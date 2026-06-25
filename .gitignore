@@ -1,0 +1,22 @@
+# 构建产物 / 生成物
+fw/build/
+fw/managed_components/
+fw/sdkconfig
+fw/sdkconfig.old
+fw/.cache/
+.cache/
+compile_commands.json
+
+# 本机密钥（WiFi 密码等）
+fw/main/wifi_secret.h
+
+# 大文件：出厂固件备份等
+backups/
+*.bin
+
+# 个人规划笔记，仅本地保留
+PLAN.md
+
+# 系统杂物
+.DS_Store
+._*
