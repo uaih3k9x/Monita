@@ -125,7 +125,7 @@ void app_main(void)
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
         }
-        if (page_dirty) page_dirty = false;                // 回到脸页：脸每帧都画，气泡靠 shown_bub 已重置
+        if (page_dirty) { display_clear(); page_dirty = false; }  // 回脸：整屏清掉媒体页全屏残留，脸/气泡随后重画
 
         // 事件覆盖：poll 触发的临时表情（载波/制式/上线），TTL 内盖住稳态
         const bool evt = (g_evt_until != 0) &&
