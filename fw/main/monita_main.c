@@ -1,6 +1,7 @@
 // 小圆脸固件 · Phase 3a：无口萌脸 六种眼神 + 待机动画
 // 显示：Waveshare ESP32-S3-Touch-AMOLED-1.75（CO5300 466x466 QSPI）
 #include <string.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
 #include <stdbool.h>
@@ -41,7 +42,7 @@ static const char *TAG = "monita";
 #define FACE_URL  "http://192.168.2.254/face.json"
 
 // ── OTA（终结 USB 烧录痛苦：之后只需 build → 拷 bin 到路由器 /www → 板子自更新）──
-#define FW_VERSION   8                                       // 每次发版 +1
+#define FW_VERSION   10                                      // 每次发版 +1
 #define OTA_VER_URL  "http://192.168.2.254/monita.ver"       // 内容是个数字
 #define OTA_BIN_URL  "http://192.168.2.254/monita-fw.bin"
 
@@ -112,12 +113,19 @@ static const mood_t MOODS[] = {
     {"surprised", EYE_WIDE,    48, 60, 34, 1.0f, true,  false, true,  false, false, "咦？新设备"},
     {"offline",   EYE_SQUEEZE, 40, 44, 14, 1.0f, false, true,  false, false, true,  "WAN 掉了…"},
     {"sleepy",    EYE_SLEEPY,  42, 30, 12, 0.5f, false, false, false, false, false, "z z z"},
+    {"wilt",      EYE_STRAIN,  38, 26, 14, 0.7f, true,  false, false, false, false, ""},
 };
 #define N_MOODS (sizeof(MOODS) / sizeof(MOODS[0]))
-enum { M_HAPPY, M_GRIN, M_BUSY, M_SURPRISED, M_OFFLINE, M_SLEEPY };  // 与 MOODS 顺序一致
+enum { M_HAPPY, M_GRIN, M_BUSY, M_SURPRISED, M_OFFLINE, M_SLEEPY, M_WILT };  // 与 MOODS 顺序一致
 
 static volatile int  g_mood = M_HAPPY;   // 目标表情（poll 任务设置）
 static volatile bool g_net  = false;     // WiFi 是否拿到 IP
+
+// 动态气泡（poll 任务填，渲染循环读）
+static char g_dyn_bub[64] = "";          // 稳态气泡：busy 实时吞吐 / offline / sleepy 性格台词
+static char g_evt_bub[64] = "";          // 事件气泡（载波/制式/上线）
+static volatile int        g_evt_mood  = M_SURPRISED;  // 事件期间盖的表情
+static volatile TickType_t g_evt_until = 0;            // 事件覆盖到期 tick（0=从未触发）
 
 // blit DMA 完成信号量
 static SemaphoreHandle_t s_blit_done;
@@ -697,16 +705,27 @@ static long jnum(cJSON *o, const char *k, long def)
     return (i && cJSON_IsNumber(i)) ? (long)i->valuedouble : def;
 }
 
-// face.json → mood：在线/信号(底噪心情)/吞吐(忙碌)
+// face.json → mood：情绪两轴
+//   吞吐轴 = 忙不忙（迟滞：进 >250k / 退 <120k，别在边界抖）
+//   信号轴 = 舒不舒服（grin / happy / 蔫）
+static bool s_busy = false;       // 吞吐忙碌迟滞态（跨轮询保留）
+
 static int map_mood(cJSON *j)
 {
-    if (jnum(j, "online", 1) == 0) return M_OFFLINE;          // 断网
+    if (jnum(j, "online", 1) == 0) return M_OFFLINE;          // 断网（最高优先）
     long dl = jnum(j, "dl_bps", 0), ul = jnum(j, "ul_bps", 0);
     long sinr = jnum(j, "sinr", 99), rsrp = jnum(j, "rsrp", -50);
-    if (dl + ul > 200000) return M_BUSY;                      // >~200KB/s 在忙
-    if (sinr >= 14) return M_GRIN;                            // 信号美滋滋
-    if (sinr >= 6 || rsrp >= -100) return M_HAPPY;            // 信号还行
-    return M_BUSY;                                            // 信号差 → 蔫(眯眼)
+    long thr = dl + ul;
+
+    // 吞吐轴：忙碌迟滞
+    if (s_busy) { if (thr < 120000) s_busy = false; }        // 退忙
+    else        { if (thr > 250000) s_busy = true;  }        // 进忙
+    if (s_busy) return M_BUSY;
+
+    // 信号轴：底噪心情
+    if (sinr >= 12 || rsrp >= -90) return M_GRIN;            // 信号美滋滋
+    if (sinr <  6  && rsrp < -105) return M_WILT;            // 信号差 → 蔫(眯眼无汗)
+    return M_HAPPY;                                           // 中间
 }
 
 static void poll_task(void *arg)
@@ -725,7 +744,73 @@ static void poll_task(void *arg)
                 body[total] = 0;
                 if (total > 0) {
                     cJSON *j = cJSON_Parse(body);
-                    if (j) { g_mood = map_mood(j); cJSON_Delete(j); }
+                    if (j) {
+                        long dl = jnum(j, "dl_bps", 0), ul = jnum(j, "ul_bps", 0);
+                        long thr = dl + ul;
+                        int  online = (int)jnum(j, "online", 1);
+                        int  bandc  = (int)jnum(j, "band_count", 0);
+                        cJSON *jm = cJSON_GetObjectItem(j, "mode");
+                        const char *mode = (jm && cJSON_IsString(jm)) ? jm->valuestring : "";
+
+                        int target = map_mood(j);
+
+                        // E4 久闲→sleepy：信号好(grin/happy) + 吞吐持续很低 ~5min
+                        static int idle_polls = 0;
+                        if (g_touched) idle_polls = 0;
+                        else if ((target == M_HAPPY || target == M_GRIN) && thr < 20000) {
+                            if (idle_polls < 9999) idle_polls++;
+                        } else idle_polls = 0;
+                        if (idle_polls >= 75) target = M_SLEEPY;   // 75×4s ≈ 5min
+
+                        // 防抖：新 mood 连续 2 次轮询稳定才切换（offline 立即生效）
+                        static int cand = M_HAPPY, cand_cnt = 0;
+                        if (target == M_OFFLINE || target == g_mood) {
+                            g_mood = target; cand_cnt = 0;
+                        } else if (target == cand) {
+                            if (++cand_cnt >= 2) { g_mood = target; cand_cnt = 0; }
+                        } else { cand = target; cand_cnt = 1; }
+
+                        // E2 事件检测（与上一拍比）→ 临时盖 surprised + 短气泡 4.5s
+                        static int  prev_init = 0, prev_online = 1, prev_bandc = -1;
+                        static char prev_mode[24] = "";
+                        if (prev_init) {
+                            int fired = 0;
+                            if (online && !prev_online) {
+                                strcpy(g_evt_bub, "上线啦~"); fired = 1;
+                            } else if (bandc != prev_bandc && bandc > 0 && prev_bandc > 0) {
+                                snprintf(g_evt_bub, sizeof g_evt_bub, "载波%s%dCC",
+                                         bandc > prev_bandc ? "↑→" : "↓→", bandc);
+                                fired = 1;
+                            } else if (mode[0] && prev_mode[0] && strcmp(mode, prev_mode) != 0) {
+                                snprintf(g_evt_bub, sizeof g_evt_bub, "切 %s", mode);
+                                fired = 1;
+                            }
+                            if (fired) {
+                                g_evt_mood  = M_SURPRISED;
+                                g_evt_until = xTaskGetTickCount() + pdMS_TO_TICKS(4500);
+                                ESP_LOGI(TAG, "事件→%s", g_evt_bub);
+                            }
+                        }
+                        prev_online = online; prev_bandc = bandc;
+                        strncpy(prev_mode, mode, sizeof prev_mode - 1);
+                        prev_mode[sizeof prev_mode - 1] = 0;
+                        prev_init = 1;
+
+                        // E3 稳态动态气泡：busy 显实时吞吐，offline/sleepy 走性格台词，其余空
+                        if (g_mood == M_BUSY) {
+                            double mbps = (dl >= ul ? dl : ul) / 1e6;
+                            snprintf(g_dyn_bub, sizeof g_dyn_bub, "%s%.1fM/s",
+                                     dl >= ul ? "↓" : "↑", mbps);
+                        } else if (g_mood == M_OFFLINE) {
+                            strcpy(g_dyn_bub, "WAN 掉了…");
+                        } else if (g_mood == M_SLEEPY) {
+                            strcpy(g_dyn_bub, "z z z");
+                        } else {
+                            g_dyn_bub[0] = 0;   // grin/happy/wilt 稳态无气泡
+                        }
+
+                        cJSON_Delete(j);
+                    }
                 }
                 esp_http_client_close(c);
             }
@@ -764,7 +849,7 @@ void app_main(void)
     ESP_LOGI(TAG, "Phase 5：连 %s → 轮询 %s 驱动表情", WIFI_SSID, FACE_URL);
 
     int   t = 0;
-    const char *shown_bub = (const char *)1;   // 已显示的气泡（强制首帧画）
+    char  shown_bub[64] = {1, 0};               // 已显示的气泡文本（首帧强制画）
     int   shown_bstate = -99;
     float pet = 0.0f;                          // 摸摸头愉悦度
     int   next_blink = 50; float blink = 0.0f;
@@ -780,11 +865,21 @@ void app_main(void)
         if (pet < 0.0f) pet = 0.0f; else if (pet > 1.3f) pet = 1.3f;
         const bool petting = pet > 0.18f;
 
-        const mood_t *m = petting ? (pet > 0.75f ? &PET_HI : &PET_LO) : &MOODS[g_mood];
+        // 事件覆盖：poll 触发的临时表情（载波/制式/上线），TTL 内盖住稳态
+        const bool evt = (g_evt_until != 0) &&
+                         ((int32_t)(xTaskGetTickCount() - g_evt_until) < 0);
 
-        if (m->bubble != shown_bub) {          // 台词变了 → 刷气泡
-            shown_bub = m->bubble;
-            draw_bubble(panel, g_bub, m->bubble);
+        const mood_t *m = petting ? (pet > 0.75f ? &PET_HI : &PET_LO)
+                        : evt     ? &MOODS[g_evt_mood]
+                                  : &MOODS[g_mood];
+
+        // 想显示的气泡：摸头用合成台词，事件用事件气泡，否则用网络层动态气泡
+        const char *want = petting ? m->bubble : evt ? g_evt_bub : g_dyn_bub;
+
+        if (strncmp(want, shown_bub, sizeof shown_bub) != 0) {   // 台词变了 → 刷气泡
+            strncpy(shown_bub, want, sizeof shown_bub - 1);
+            shown_bub[sizeof shown_bub - 1] = 0;
+            draw_bubble(panel, g_bub, want);
             ESP_LOGI(TAG, "%s%s net=%d", petting ? "摸→" : "mood=", m->name, (int)g_net);
         }
 
