@@ -24,15 +24,14 @@
 #include "esp_netif.h"
 #include "esp_event.h"
 #include "esp_http_client.h"
-#include "esp_https_ota.h"
-#include "esp_ota_ops.h"
-#include "driver/i2c_master.h"
-#include "driver/gpio.h"
 #include "cJSON.h"
 #include "font_cjk.h"
 #include "i2c_bus.h"             // 共享 I2C 总线（电量 + 触摸）
 #include "power.h"               // AXP2101 电量（g_batt / g_charging / power_read）
 #include "touch.h"               // CST9217 触摸（g_touched / g_tx / g_ty / touch_task）
+#include "net.h"                 // g_net（WiFi 是否拿到 IP）
+#include "ota.h"                 // ota_task（OTA 自更新）
+#include "version.h"             // FW_VERSION
 
 
 static const char *TAG = "monita";
@@ -41,10 +40,6 @@ static const char *TAG = "monita";
 #include "wifi_secret.h"          // 定义 WIFI_SSID / WIFI_PASS（本地文件，不提交）
 #define FACE_URL  "http://192.168.2.254/face.json"
 
-// ── OTA（终结 USB 烧录痛苦：之后只需 build → 拷 bin 到路由器 /www → 板子自更新）──
-#define FW_VERSION   12                                      // 每次发版 +1
-#define OTA_VER_URL  "http://192.168.2.254/monita.ver"       // 内容是个数字
-#define OTA_BIN_URL  "http://192.168.2.254/monita-fw.bin"
 
 
 // ── 板级引脚（官方 BSP）──
@@ -115,7 +110,7 @@ static const mood_t MOODS[] = {
 enum { M_HAPPY, M_GRIN, M_BUSY, M_SURPRISED, M_OFFLINE, M_SLEEPY, M_WILT };  // 与 MOODS 顺序一致
 
 static volatile int  g_mood = M_HAPPY;   // 目标表情（poll 任务设置）
-static volatile bool g_net  = false;     // WiFi 是否拿到 IP
+volatile bool g_net  = false;            // WiFi 是否拿到 IP（暂仍定义在此，net 提取后移走）
 
 // 动态气泡（poll 任务填，渲染循环读）
 static char g_dyn_bub[64] = "";          // 稳态气泡：busy 实时吞吐 / offline / sleepy 性格台词
@@ -492,73 +487,6 @@ static esp_lcd_panel_handle_t display_init(void)
 
 static inline float frand(void) { return (float)esp_random() / (float)UINT32_MAX; }
 
-
-// ── OTA ──
-static int http_get_int(const char *url, int def)
-{
-    esp_http_client_config_t cfg = { .url = url, .timeout_ms = 4000 };
-    esp_http_client_handle_t c = esp_http_client_init(&cfg);
-    int v = def;
-    if (c && esp_http_client_open(c, 0) == ESP_OK) {
-        esp_http_client_fetch_headers(c);
-        char b[16] = {0}; int total = 0, n;
-        while (total < (int)sizeof(b) - 1 &&
-               (n = esp_http_client_read(c, b + total, sizeof(b) - 1 - total)) > 0) total += n;
-        if (total > 0) { b[total] = 0; v = atoi(b); }
-        esp_http_client_close(c);
-    }
-    if (c) esp_http_client_cleanup(c);
-    return v;
-}
-
-// 手动 OTA：HTTP 流式下载 → 写入备用分区（纯 HTTP，无 TLS 假设）
-static esp_err_t do_ota(const char *url)
-{
-    esp_http_client_config_t cfg = { .url = url, .timeout_ms = 30000, .keep_alive_enable = true };
-    esp_http_client_handle_t c = esp_http_client_init(&cfg);
-    if (!c) return ESP_FAIL;
-    if (esp_http_client_open(c, 0) != ESP_OK) { esp_http_client_cleanup(c); return ESP_FAIL; }
-    esp_http_client_fetch_headers(c);
-
-    const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
-    esp_ota_handle_t h = 0;
-    esp_err_t err = part ? esp_ota_begin(part, OTA_SIZE_UNKNOWN, &h) : ESP_FAIL;
-    if (err != ESP_OK) { esp_http_client_close(c); esp_http_client_cleanup(c); return ESP_FAIL; }
-
-    char *buf = malloc(4096);
-    int n, written = 0;
-    while ((n = esp_http_client_read(c, buf, 4096)) > 0) {
-        if (esp_ota_write(h, buf, n) != ESP_OK) { err = ESP_FAIL; break; }
-        written += n;
-    }
-    free(buf);
-    if (n < 0) err = ESP_FAIL;
-    esp_http_client_close(c);
-    esp_http_client_cleanup(c);
-
-    if (err == ESP_OK && esp_ota_end(h) == ESP_OK && esp_ota_set_boot_partition(part) == ESP_OK) {
-        ESP_LOGW(TAG, "OTA 写入 %d 字节", written);
-        return ESP_OK;
-    }
-    esp_ota_abort(h);
-    return ESP_FAIL;
-}
-
-static void ota_task(void *arg)
-{
-    while (true) {
-        vTaskDelay(pdMS_TO_TICKS(15000));
-        if (!g_net) continue;
-        power_read();                                     // 顺便刷新电量
-        int remote = http_get_int(OTA_VER_URL, -1);
-        ESP_LOGI(TAG, "OTA 检查：远程 ver=%d，本机 v%d", remote, FW_VERSION);
-        if (remote > FW_VERSION) {
-            ESP_LOGW(TAG, "发现新固件 v%d（本机 v%d）→ OTA…", remote, FW_VERSION);
-            if (do_ota(OTA_BIN_URL) == ESP_OK) { ESP_LOGW(TAG, "OTA 成功，重启"); esp_restart(); }
-            else ESP_LOGE(TAG, "OTA 失败");
-        }
-    }
-}
 
 // ── WiFi ──
 static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
