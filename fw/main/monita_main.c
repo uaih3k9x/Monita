@@ -30,6 +30,8 @@
 #include "driver/gpio.h"
 #include "cJSON.h"
 #include "font_cjk.h"
+#include "i2c_bus.h"             // 共享 I2C 总线（电量 + 触摸）
+#include "power.h"               // AXP2101 电量（g_batt / g_charging / power_read）
 
 // ── 触摸 CST9217（与 AXP 共用 I2C：SDA15/SCL14，地址 0x5A，RST40/INT11）──
 #define TP_ADDR  0x5A
@@ -43,14 +45,10 @@ static const char *TAG = "monita";
 #define FACE_URL  "http://192.168.2.254/face.json"
 
 // ── OTA（终结 USB 烧录痛苦：之后只需 build → 拷 bin 到路由器 /www → 板子自更新）──
-#define FW_VERSION   10                                      // 每次发版 +1
+#define FW_VERSION   11                                      // 每次发版 +1
 #define OTA_VER_URL  "http://192.168.2.254/monita.ver"       // 内容是个数字
 #define OTA_BIN_URL  "http://192.168.2.254/monita-fw.bin"
 
-// ── AXP2101 电源管理（I2C：SDA15 / SCL14，地址 0x34）──
-#define AXP_ADDR     0x34
-#define I2C_SDA      15
-#define I2C_SCL      14
 
 // ── 板级引脚（官方 BSP）──
 #define LCD_HOST     SPI2_HOST
@@ -497,40 +495,7 @@ static esp_lcd_panel_handle_t display_init(void)
 
 static inline float frand(void) { return (float)esp_random() / (float)UINT32_MAX; }
 
-// ── AXP2101 电量（I2C）──
-static volatile int  g_batt = -1;        // 电池百分比（-1=未知）
-static volatile bool g_charging = false;
-static i2c_master_dev_handle_t s_axp;
-static i2c_master_bus_handle_t s_i2c_bus;   // AXP 与触摸共用
-
-static esp_err_t axp_rd(uint8_t reg, uint8_t *val)
-{
-    return s_axp ? i2c_master_transmit_receive(s_axp, &reg, 1, val, 1, 100) : ESP_FAIL;
-}
-
-static void axp_init(void)
-{
-    i2c_master_bus_config_t bc = {
-        .i2c_port = -1, .sda_io_num = I2C_SDA, .scl_io_num = I2C_SCL,
-        .clk_source = I2C_CLK_SRC_DEFAULT, .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = true,
-    };
-    if (i2c_new_master_bus(&bc, &s_i2c_bus) != ESP_OK) { ESP_LOGW(TAG, "I2C 建失败"); return; }
-    i2c_device_config_t dc = { .dev_addr_length = I2C_ADDR_BIT_LEN_7, .device_address = AXP_ADDR, .scl_speed_hz = 400000 };
-    if (i2c_master_bus_add_device(s_i2c_bus, &dc, &s_axp) != ESP_OK) { ESP_LOGW(TAG, "AXP2101 挂载失败"); s_axp = NULL; return; }
-    uint8_t id = 0, s0 = 0, s1 = 0, pct = 0xFF;
-    axp_rd(0x03, &id); axp_rd(0x00, &s0); axp_rd(0x01, &s1); axp_rd(0xA4, &pct);
-    ESP_LOGI(TAG, "AXP2101 id=0x%02x status0=0x%02x status1=0x%02x batt(0xA4)=%d", id, s0, s1, pct);
-}
-
-static void axp_read(void)
-{
-    uint8_t pct = 0xFF, st = 0;
-    if (axp_rd(0xA4, &pct) == ESP_OK && pct <= 100) g_batt = pct;
-    if (axp_rd(0x00, &st) == ESP_OK) g_charging = (st & 0x20) != 0;   // bit5 ≈ VBUS/充电（先这样，看 dump 再校）
-}
-
-// ── 触摸 CST9217（自写极简版，复用 s_i2c_bus）──
+// ── 触摸 CST9217（自写极简版，复用 i2c_bus()）──
 static i2c_master_dev_handle_t s_tp;
 static volatile bool g_touched = false;
 static volatile int  g_tx = 0, g_ty = 0;
@@ -556,7 +521,7 @@ static esp_err_t tp_wr(uint16_t reg, const uint8_t *val, size_t vlen)
 
 static void tp_init(void)
 {
-    if (!s_i2c_bus) return;
+    if (!i2c_bus()) return;
     gpio_config_t rc = { .pin_bit_mask = BIT64(TP_RST), .mode = GPIO_MODE_OUTPUT };
     gpio_config(&rc);
     gpio_config_t ic = { .pin_bit_mask = BIT64(TP_INT), .mode = GPIO_MODE_INPUT };
@@ -564,7 +529,7 @@ static void tp_init(void)
     gpio_set_level(TP_RST, 0); vTaskDelay(pdMS_TO_TICKS(10));
     gpio_set_level(TP_RST, 1); vTaskDelay(pdMS_TO_TICKS(50));
     i2c_device_config_t dc = { .dev_addr_length = I2C_ADDR_BIT_LEN_7, .device_address = TP_ADDR, .scl_speed_hz = 400000 };
-    if (i2c_master_bus_add_device(s_i2c_bus, &dc, &s_tp) != ESP_OK) { s_tp = NULL; ESP_LOGW(TAG, "触摸挂载失败"); return; }
+    if (i2c_master_bus_add_device(i2c_bus(), &dc, &s_tp) != ESP_OK) { s_tp = NULL; ESP_LOGW(TAG, "触摸挂载失败"); return; }
 
     // 初始化握手（照官方驱动 read_config）：进命令模式 + 读校验码/分辨率
     uint8_t cm[2] = { 0xD1, 0x01 };
@@ -663,7 +628,7 @@ static void ota_task(void *arg)
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(15000));
         if (!g_net) continue;
-        axp_read();                                       // 顺便刷新电量
+        power_read();                                     // 顺便刷新电量
         int remote = http_get_int(OTA_VER_URL, -1);
         ESP_LOGI(TAG, "OTA 检查：远程 ver=%d，本机 v%d", remote, FW_VERSION);
         if (remote > FW_VERSION) {
@@ -835,8 +800,9 @@ void app_main(void)
     clear_screen(panel);
     draw_bubble(panel, g_bub, MOODS[M_HAPPY].bubble);
 
-    axp_init();                 // 电源管理芯片（后台读电量）
-    axp_read();
+    i2c_bus_init();             // 共享 I2C 总线（电量 + 触摸）
+    power_init();               // 电源管理芯片（AXP2101，后台读电量）
+    power_read();
     tp_init();                  // 触摸（摸摸头）
 
     // 联网 + 轮询 face.json + OTA 自更新
@@ -888,7 +854,7 @@ void app_main(void)
         int bstate = petting ? (g_batt * 4 + (g_charging ? 1 : 0)) : -1;
         if (bstate != shown_bstate) {
             shown_bstate = bstate;
-            if (petting) { axp_read(); draw_battery(panel, g_batt, g_charging); }
+            if (petting) { power_read(); draw_battery(panel, g_batt, g_charging); }
             else draw_battery(panel, -1, false);
         }
 
