@@ -25,6 +25,15 @@ enum { M_HAPPY, M_GRIN, M_BUSY, M_SURPRISED, M_OFFLINE, M_SLEEPY, M_WILT };  // 
 #define N_MOODS 7
 extern const mood_t MOODS[];
 
+// 最近一拍 face.json 的原始数值（数值页显示用）
+typedef struct {
+    int  online, rsrp, sinr, band_count, temp;
+    long dl, ul;
+    char mode[24];
+    char band[12];
+} stat_t;
+extern stat_t g_stat;
+
 // 共享状态（渲染循环读，mood_update 写）
 extern volatile int        g_mood;        // 目标表情
 extern char                g_dyn_bub[64]; // 稳态动态气泡：busy 实时吞吐 / offline / sleepy 性格台词

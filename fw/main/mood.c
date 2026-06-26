@@ -19,6 +19,7 @@ const mood_t MOODS[] = {
     {"wilt",      EYE_STRAIN,  38, 26, 14, 0.7f, true,  false, false, false, false, ""},
 };
 
+stat_t              g_stat = {0};
 volatile int        g_mood = M_HAPPY;
 char                g_dyn_bub[64] = "";
 char                g_evt_bub[64] = "";
@@ -62,6 +63,15 @@ void mood_update(cJSON *j)
     int  bandc  = (int)jnum(j, "band_count", 0);
     cJSON *jm = cJSON_GetObjectItem(j, "mode");
     const char *mode = (jm && cJSON_IsString(jm)) ? jm->valuestring : "";
+
+    // 存一份原始数值供数值页显示
+    cJSON *jb = cJSON_GetObjectItem(j, "band");
+    const char *band = (jb && cJSON_IsString(jb)) ? jb->valuestring : "";
+    g_stat.online = online; g_stat.band_count = bandc;
+    g_stat.rsrp = (int)jnum(j, "rsrp", 0);  g_stat.sinr = (int)jnum(j, "sinr", 0);
+    g_stat.temp = (int)jnum(j, "temp", 0);  g_stat.dl = dl;  g_stat.ul = ul;
+    strncpy(g_stat.mode, mode, sizeof g_stat.mode - 1); g_stat.mode[sizeof g_stat.mode - 1] = 0;
+    strncpy(g_stat.band, band, sizeof g_stat.band - 1); g_stat.band[sizeof g_stat.band - 1] = 0;
 
     int target = map_mood(j);
 

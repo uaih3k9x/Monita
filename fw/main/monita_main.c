@@ -405,6 +405,29 @@ static void draw_battery(esp_lcd_panel_handle_t panel, int pct, bool charging)
     blit_psram(panel, g_top, TOPX, TOPY, TOPW, TOPH);
 }
 
+// 数值页：标题(含版本号) + 蜂窝指标，画进脸区域缓冲后整块推屏
+static void draw_stats_page(esp_lcd_panel_handle_t panel, uint16_t *buf)
+{
+    memset(buf, 0x00, (size_t)RW * RH * 2);
+    const uint16_t W = 0xFFFF;                 // 白（字节序对称）
+    const uint16_t C = sw16(0x07FF);           // 青（标题）
+    char s[48];
+    int x = 16, y = 6, lh = FONT_H + 9;
+
+    snprintf(s, sizeof s, "模拟太 v%d", FW_VERSION);
+    draw_text(buf, RW, x, y, s, C); y += lh + 3;
+    snprintf(s, sizeof s, "RSRP %d  SINR %d", g_stat.rsrp, g_stat.sinr);
+    draw_text(buf, RW, x, y, s, W); y += lh;
+    snprintf(s, sizeof s, "载波 %dCC  B%s", g_stat.band_count, g_stat.band[0] ? g_stat.band : "?");
+    draw_text(buf, RW, x, y, s, W); y += lh;
+    snprintf(s, sizeof s, "↓%ldk ↑%ldk", g_stat.dl / 1000, g_stat.ul / 1000);
+    draw_text(buf, RW, x, y, s, W); y += lh;
+    snprintf(s, sizeof s, "%s %d℃ 电%d%%", g_stat.mode[0] ? g_stat.mode : "?", g_stat.temp, g_batt);
+    draw_text(buf, RW, x, y, s, W);
+
+    blit_psram(panel, buf, RX0, RY0, RW, RH);
+}
+
 static const co5300_lcd_init_cmd_t lcd_init_cmds[] = {
     {0xFE, (uint8_t[]){0x20}, 1, 0}, {0x19, (uint8_t[]){0x10}, 1, 0}, {0x1C, (uint8_t[]){0xA0}, 1, 0},
     {0xFE, (uint8_t[]){0x00}, 1, 0}, {0xC4, (uint8_t[]){0x80}, 1, 0}, {0x3A, (uint8_t[]){0x55}, 1, 0},
@@ -539,15 +562,52 @@ void app_main(void)
     int   next_blink = 50; float blink = 0.0f;
     int   next_gaze = 80, gaze_hold = 0; float gx = 0.0f, gaze_target = 0.0f;
 
+    // 翻页 + 手势：快速轻点=翻页，长按≥300ms/滑动=摸头（区分开）
+    int   page = 0;                             // 0=脸 1=数值页
+    bool  page_dirty = false;
+    bool  was_touch = false, moved = false;
+    TickType_t down_t = 0; int down_x = 0, down_y = 0;
+    int   stats_tick = 0;
+
     // 被摸态合成表情（∩ 弯眼 + 强腮红）
     static const mood_t PET_LO = {"pet", EYE_HAPPY, 46, 32, 26, 1.0f, false, false, true, false, false, "好舒服~"};
     static const mood_t PET_HI = {"pet", EYE_HAPPY, 48, 30, 28, 1.0f, false, false, true, false, false, "再摸摸~"};
 
     while (true) {
-        // 摸摸头：愉悦度累积/衰减
-        if (g_touched) pet += 0.06f; else pet -= 0.025f;
+        // ── 触摸手势：轻点翻页 vs 长按摸头 ──
+        bool tnow = g_touched;
+        if (tnow && !was_touch) { down_t = xTaskGetTickCount(); down_x = g_tx; down_y = g_ty; moved = false; }
+        if (tnow && (abs(g_tx - down_x) > 40 || abs(g_ty - down_y) > 40)) moved = true;
+        if (!tnow && was_touch) {                          // 松手
+            if (!moved && (xTaskGetTickCount() - down_t) < pdMS_TO_TICKS(300)) {
+                page = (page + 1) % 2;                      // 快速轻点 → 翻页
+                page_dirty = true;
+                pet = 0.0f;                                 // 翻页不算摸头
+            }
+        }
+        was_touch = tnow;
+
+        // 摸摸头：只有在脸页、且按住超过 300ms（非轻点）才累积愉悦
+        bool holding = tnow && page == 0 && (xTaskGetTickCount() - down_t) >= pdMS_TO_TICKS(300);
+        if (holding) pet += 0.06f; else pet -= 0.025f;
         if (pet < 0.0f) pet = 0.0f; else if (pet > 1.3f) pet = 1.3f;
         const bool petting = pet > 0.18f;
+
+        // ── 数值页：清气泡/电量，定期刷数值，跳过脸渲染 ──
+        if (page == 1) {
+            if (page_dirty) {
+                draw_bubble(panel, g_bub, "");             // 清气泡带
+                draw_battery(panel, -1, false);            // 清电量
+                shown_bub[0] = 1; shown_bub[1] = 0;        // 回脸页时强制重画气泡
+                shown_bstate = -99;
+                stats_tick = 0; page_dirty = false;
+            }
+            if ((stats_tick++ % 50) == 0) draw_stats_page(panel, g_face);
+            t++;
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        if (page_dirty) page_dirty = false;                // 回到脸页：脸每帧都画，气泡靠 shown_bub 已重置
 
         // 事件覆盖：poll 触发的临时表情（载波/制式/上线），TTL 内盖住稳态
         const bool evt = (g_evt_until != 0) &&
