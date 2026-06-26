@@ -1,6 +1,7 @@
 // 小圆脸固件 · Phase 3a：无口萌脸 六种眼神 + 待机动画
 // 显示：Waveshare ESP32-S3-Touch-AMOLED-1.75（CO5300 466x466 QSPI）
 #include <string.h>
+#include <stdlib.h>
 #include <math.h>
 #include <stdbool.h>
 #include "freertos/FreeRTOS.h"
@@ -21,6 +22,9 @@
 #include "esp_netif.h"
 #include "esp_event.h"
 #include "esp_http_client.h"
+#include "esp_https_ota.h"
+#include "esp_ota_ops.h"
+#include "driver/i2c_master.h"
 #include "cJSON.h"
 #include "font_cjk.h"
 
@@ -29,6 +33,16 @@ static const char *TAG = "monita";
 // ── WiFi / 数据源 ──
 #include "wifi_secret.h"          // 定义 WIFI_SSID / WIFI_PASS（本地文件，不提交）
 #define FACE_URL  "http://192.168.2.254/face.json"
+
+// ── OTA（终结 USB 烧录痛苦：之后只需 build → 拷 bin 到路由器 /www → 板子自更新）──
+#define FW_VERSION   5                                       // 每次发版 +1
+#define OTA_VER_URL  "http://192.168.2.254/monita.ver"       // 内容是个数字
+#define OTA_BIN_URL  "http://192.168.2.254/monita-fw.bin"
+
+// ── AXP2101 电源管理（I2C：SDA15 / SCL14，地址 0x34）──
+#define AXP_ADDR     0x34
+#define I2C_SDA      15
+#define I2C_SCL      14
 
 // ── 板级引脚（官方 BSP）──
 #define LCD_HOST     SPI2_HOST
@@ -59,6 +73,12 @@ static const char *TAG = "monita";
 // 底部气泡带
 #define BUB_Y0 350
 #define BUB_H  62
+
+// 顶部电量指示
+#define TOPW 84
+#define TOPH 26
+#define TOPX ((LCD_W - TOPW) / 2)
+#define TOPY 22
 
 // 眼形
 typedef enum { EYE_ROUND, EYE_WIDE, EYE_HAPPY, EYE_SLEEPY, EYE_STRAIN, EYE_SQUEEZE } eye_shape_t;
@@ -98,6 +118,7 @@ static SemaphoreHandle_t s_blit_done;
 static int64_t g_render_us, g_blit_us;
 static uint16_t *g_face;    // 脸区域渲染目标（PSRAM, RW×RH）
 static uint16_t *g_bub;     // 气泡带渲染目标（PSRAM, LCD_W×BUB_H）
+static uint16_t *g_top;     // 顶部电量指示（PSRAM, TOPW×TOPH）
 static uint16_t *g_chunk;   // 推屏用内部 DMA 小缓冲（LCD_W×FACE_CHUNK）—— 唯一占内部RAM的大块
 static bool IRAM_ATTR on_color_done(esp_lcd_panel_io_handle_t io,
                                     esp_lcd_panel_io_event_data_t *e, void *ctx)
@@ -395,6 +416,27 @@ static void draw_bubble(esp_lcd_panel_handle_t panel, uint16_t *buf, const char 
     blit_psram(panel, buf, 0, BUB_Y0, LCD_W, BUB_H);
 }
 
+// 顶部电量指示：电池外框 + 按 pct 填色（绿/黄/红，充电=青）。Phase C 摸头时调用。
+__attribute__((unused))
+static void draw_battery(esp_lcd_panel_handle_t panel, int pct, bool charging)
+{
+    memset(g_top, 0x00, (size_t)TOPW * TOPH * 2);
+    if (pct >= 0) {
+        const int bw = 60, bh = 22, bx = 6, by = (TOPH - bh) / 2;
+        const uint16_t border = sw16(0xC618);                 // 浅灰边框
+        for (int x = 0; x < bw; x++) { g_top[by * TOPW + bx + x] = border; g_top[(by + bh - 1) * TOPW + bx + x] = border; }
+        for (int y = 0; y < bh; y++) { g_top[(by + y) * TOPW + bx] = border; g_top[(by + y) * TOPW + bx + bw - 1] = border; }
+        for (int y = bh / 2 - 3; y < bh / 2 + 3; y++)          // 右侧正极帽
+            for (int x = 0; x < 3; x++) g_top[(by + y) * TOPW + bx + bw + x] = border;
+        uint16_t col = charging ? 0x07FF : (pct > 40 ? 0x07E0 : (pct > 15 ? 0xFFE0 : 0xF800));
+        const uint16_t fc = sw16(col);
+        int fw = (bw - 6) * pct / 100;
+        for (int y = 2; y < bh - 2; y++)
+            for (int x = 0; x < fw; x++) g_top[(by + y) * TOPW + bx + 2 + x] = fc;
+    }
+    blit_psram(panel, g_top, TOPX, TOPY, TOPW, TOPH);
+}
+
 static const co5300_lcd_init_cmd_t lcd_init_cmds[] = {
     {0xFE, (uint8_t[]){0x20}, 1, 0}, {0x19, (uint8_t[]){0x10}, 1, 0}, {0x1C, (uint8_t[]){0xA0}, 1, 0},
     {0xFE, (uint8_t[]){0x00}, 1, 0}, {0xC4, (uint8_t[]){0x80}, 1, 0}, {0x3A, (uint8_t[]){0x55}, 1, 0},
@@ -439,6 +481,106 @@ static esp_lcd_panel_handle_t display_init(void)
 }
 
 static inline float frand(void) { return (float)esp_random() / (float)UINT32_MAX; }
+
+// ── AXP2101 电量（I2C）──
+static volatile int  g_batt = -1;        // 电池百分比（-1=未知）
+static volatile bool g_charging = false;
+static i2c_master_dev_handle_t s_axp;
+
+static esp_err_t axp_rd(uint8_t reg, uint8_t *val)
+{
+    return s_axp ? i2c_master_transmit_receive(s_axp, &reg, 1, val, 1, 100) : ESP_FAIL;
+}
+
+static void axp_init(void)
+{
+    i2c_master_bus_config_t bc = {
+        .i2c_port = -1, .sda_io_num = I2C_SDA, .scl_io_num = I2C_SCL,
+        .clk_source = I2C_CLK_SRC_DEFAULT, .glitch_ignore_cnt = 7,
+        .flags.enable_internal_pullup = true,
+    };
+    i2c_master_bus_handle_t bus;
+    if (i2c_new_master_bus(&bc, &bus) != ESP_OK) { ESP_LOGW(TAG, "I2C 建失败"); return; }
+    i2c_device_config_t dc = { .dev_addr_length = I2C_ADDR_BIT_LEN_7, .device_address = AXP_ADDR, .scl_speed_hz = 400000 };
+    if (i2c_master_bus_add_device(bus, &dc, &s_axp) != ESP_OK) { ESP_LOGW(TAG, "AXP2101 挂载失败"); s_axp = NULL; return; }
+    uint8_t id = 0, s0 = 0, s1 = 0, pct = 0xFF;
+    axp_rd(0x03, &id); axp_rd(0x00, &s0); axp_rd(0x01, &s1); axp_rd(0xA4, &pct);
+    ESP_LOGI(TAG, "AXP2101 id=0x%02x status0=0x%02x status1=0x%02x batt(0xA4)=%d", id, s0, s1, pct);
+}
+
+static void axp_read(void)
+{
+    uint8_t pct = 0xFF, st = 0;
+    if (axp_rd(0xA4, &pct) == ESP_OK && pct <= 100) g_batt = pct;
+    if (axp_rd(0x00, &st) == ESP_OK) g_charging = (st & 0x20) != 0;   // bit5 ≈ VBUS/充电（先这样，看 dump 再校）
+}
+
+// ── OTA ──
+static int http_get_int(const char *url, int def)
+{
+    esp_http_client_config_t cfg = { .url = url, .timeout_ms = 4000 };
+    esp_http_client_handle_t c = esp_http_client_init(&cfg);
+    int v = def;
+    if (c && esp_http_client_open(c, 0) == ESP_OK) {
+        esp_http_client_fetch_headers(c);
+        char b[16] = {0}; int total = 0, n;
+        while (total < (int)sizeof(b) - 1 &&
+               (n = esp_http_client_read(c, b + total, sizeof(b) - 1 - total)) > 0) total += n;
+        if (total > 0) { b[total] = 0; v = atoi(b); }
+        esp_http_client_close(c);
+    }
+    if (c) esp_http_client_cleanup(c);
+    return v;
+}
+
+// 手动 OTA：HTTP 流式下载 → 写入备用分区（纯 HTTP，无 TLS 假设）
+static esp_err_t do_ota(const char *url)
+{
+    esp_http_client_config_t cfg = { .url = url, .timeout_ms = 30000, .keep_alive_enable = true };
+    esp_http_client_handle_t c = esp_http_client_init(&cfg);
+    if (!c) return ESP_FAIL;
+    if (esp_http_client_open(c, 0) != ESP_OK) { esp_http_client_cleanup(c); return ESP_FAIL; }
+    esp_http_client_fetch_headers(c);
+
+    const esp_partition_t *part = esp_ota_get_next_update_partition(NULL);
+    esp_ota_handle_t h = 0;
+    esp_err_t err = part ? esp_ota_begin(part, OTA_SIZE_UNKNOWN, &h) : ESP_FAIL;
+    if (err != ESP_OK) { esp_http_client_close(c); esp_http_client_cleanup(c); return ESP_FAIL; }
+
+    char *buf = malloc(4096);
+    int n, written = 0;
+    while ((n = esp_http_client_read(c, buf, 4096)) > 0) {
+        if (esp_ota_write(h, buf, n) != ESP_OK) { err = ESP_FAIL; break; }
+        written += n;
+    }
+    free(buf);
+    if (n < 0) err = ESP_FAIL;
+    esp_http_client_close(c);
+    esp_http_client_cleanup(c);
+
+    if (err == ESP_OK && esp_ota_end(h) == ESP_OK && esp_ota_set_boot_partition(part) == ESP_OK) {
+        ESP_LOGW(TAG, "OTA 写入 %d 字节", written);
+        return ESP_OK;
+    }
+    esp_ota_abort(h);
+    return ESP_FAIL;
+}
+
+static void ota_task(void *arg)
+{
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(15000));
+        if (!g_net) continue;
+        axp_read();                                       // 顺便刷新电量
+        int remote = http_get_int(OTA_VER_URL, -1);
+        ESP_LOGI(TAG, "OTA 检查：远程 ver=%d，本机 v%d", remote, FW_VERSION);
+        if (remote > FW_VERSION) {
+            ESP_LOGW(TAG, "发现新固件 v%d（本机 v%d）→ OTA…", remote, FW_VERSION);
+            if (do_ota(OTA_BIN_URL) == ESP_OK) { ESP_LOGW(TAG, "OTA 成功，重启"); esp_restart(); }
+            else ESP_LOGE(TAG, "OTA 失败");
+        }
+    }
+}
 
 // ── WiFi ──
 static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -518,16 +660,22 @@ void app_main(void)
     // 渲染目标放 PSRAM；只有 g_chunk（推屏小缓冲）占内部 DMA RAM → WiFi 满载也不爆
     g_face  = heap_caps_malloc((size_t)RW * RH * 2, MALLOC_CAP_SPIRAM);
     g_bub   = heap_caps_malloc((size_t)LCD_W * BUB_H * 2, MALLOC_CAP_SPIRAM);
+    g_top   = heap_caps_malloc((size_t)TOPW * TOPH * 2, MALLOC_CAP_SPIRAM);
     g_chunk = heap_caps_malloc((size_t)LCD_W * FACE_CHUNK * 2, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
-    if (!g_face || !g_bub || !g_chunk) { ESP_LOGE(TAG, "缓冲分配失败"); return; }
+    if (!g_face || !g_bub || !g_top || !g_chunk) { ESP_LOGE(TAG, "缓冲分配失败"); return; }
     clear_screen(panel);
     draw_bubble(panel, g_bub, MOODS[M_HAPPY].bubble);
 
-    // 联网 + 轮询 face.json
+    axp_init();                 // 电源管理芯片（后台读电量；电量条改到摸头时才显示 → Phase C）
+    axp_read();
+
+    // 联网 + 轮询 face.json + OTA 自更新
     esp_err_t nr = nvs_flash_init();
     if (nr == ESP_ERR_NVS_NO_FREE_PAGES || nr == ESP_ERR_NVS_NEW_VERSION_FOUND) { nvs_flash_erase(); nvs_flash_init(); }
     wifi_start();
     xTaskCreate(poll_task, "poll", 8192, NULL, 4, NULL);
+    xTaskCreate(ota_task,  "ota",  8192, NULL, 3, NULL);
+    ESP_LOGI(TAG, "固件版本 v%d", FW_VERSION);
     ESP_LOGI(TAG, "Phase 5：连 %s → 轮询 %s 驱动表情", WIFI_SSID, FACE_URL);
 
     int   t = 0;
