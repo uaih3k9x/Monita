@@ -3,16 +3,14 @@
 > 名字取自《逆转裁判》希月心音胸前那台 **モニ太（模拟太）**——一块会随主人情绪变色、
 > 偶尔还替她把心里话说出来的小电脑。这只是它的现实版。日常我们也叫它「小圆脸」。
 
-一只骑在 5G CPE 上、会根据**真实网络状态**卖萌的「无口萌」表情屏。
+挂在 5G CPE 上的一块表情屏，按真实网络状态改变表情。
 
-一块 ESP32-S3 AMOLED 圆屏，显示一张没有嘴、全靠两只发光眼睛说话的脸。它通过 WiFi
-读取路由器（CPE）的蜂窝网络指标，把信号好坏 / 忙不忙 / 是否掉线，实时映射成六种情绪。
-
-> 不是仪表盘，是陪伴感。会变的 → 脸做反应；常驻数值 → 以后翻页查。
+ESP32-S3 AMOLED 圆屏，一张没有嘴、只靠两只发光眼睛的脸。通过 WiFi 读取路由器的蜂窝网络
+指标——信号、吞吐、在线状态——映射成对应表情。状态变化走表情，精确数值翻页查。
 
 ## 效果
 
-- 浏览器预览版：直接打开 [`index.html`](index.html)（纯 Canvas 画的无口萌脸 + 六种表情按钮）。
+- 浏览器预览版：直接打开 [`index.html`](index.html)（纯 Canvas 画的脸 + 六种表情按钮）。
 - 设备版：`fw/` 下的 ESP-IDF 固件，跑在真 AMOLED 上。
 
 ## 硬件
@@ -28,24 +26,39 @@
 CPE: ubus(infocd cpestatus) ──每3s──▶ /www/face.json  (uhttpd :80)
                                             │  HTTP GET（每 4s）
 ESP32-S3 ── WiFi ──────────────────────────┘
-   └─ 解析 JSON → 情绪两轴映射 → setMood → 渲染脸
+   └─ 解析 JSON → 情绪两轴映射(+事件/久闲) → 渲染脸
 ```
 
 - **情绪两轴**：信号质量（RSRP/SINR）决定「舒不舒服」的底噪心情；吞吐（dl/ul）决定「忙不忙」。
-- **六种表情**：`happy / grin / busy / surprised / offline / sleepy`，眼形 + 腮红/汗/泪 + 中文台词气泡。
+  带**迟滞 + 防抖**不在阈值附近乱跳；**载波聚合/制式切换/上下线**会冒几秒短气泡；久闲自动打盹。
+- **七种眼神**：`happy / grin / busy / surprised / offline / sleepy / wilt(蔫)`，眼形 + 腮红/汗/泪 + 中文台词气泡。
+- **摸摸头**：长按/蹭屏 → 弯眼笑 + 脸红 + 朝手指蹭 + 亮电量；松手回网络态。
+- **翻页**：轻点循环 **脸 → 数值页（精确指标 + 版本号）→ 电子吧唧（自定义图）→ 脸**。
+  轻点翻页、长按摸头，两套手势分开。
 - **渲染**：纯手写，无 LVGL。圆角盒 / 抛物线弧 / 折线 SDF 画眼睛，分层加性合成上光晕与配件，
   中文气泡用离线烤的 GB2312 点阵字库（见 `tools/genfont.py`）。
 
 ## 目录
 
+固件按职责拆成小模块，`monita_main.c` 只剩编排 + 渲染主循环：
+
 ```
 index.html              浏览器预览（设计原型）
-fw/                     ESP-IDF 固件
-  main/monita_main.c    全部逻辑：显示驱动 / 六态 / 动画 / WiFi / 取数
-  main/font_cjk.h       生成的 GB2312 24×24 点阵字库
+fw/main/
+  monita_main.c         app_main + 渲染主循环（动画状态机 / 翻页手势）
+  display.c/.h          面板(CO5300 QSPI) + 分块推屏 + SDF 画眼 + 字库 + 气泡/电量/数值页/图片
+  mood.c/.h             情绪两轴映射 + 事件状态机 + 动态气泡（mood_update）
+  net.c/.h              WiFi + 轮询 face.json + 文件下载（吧唧）
+  ota.c/.h              手动 esp_ota 流式自更新
+  touch.c/.h            CST9217 触摸驱动 + 轮询任务
+  power.c/.h            AXP2101 电量
+  i2c_bus.c/.h          共享 I2C 总线（电量 + 触摸）
+  version.h             FW_VERSION（OTA 比对，发版改一处）
+  font_cjk.h            生成的 GB2312 24×24 点阵字库
   sdkconfig.defaults    板级配置（32MB Flash + Octal PSRAM + -O2）
-  partitions.csv
+  partitions.csv        OTA 双槽 + 存储分区
 tools/genfont.py        字库烤制脚本（macOS + PIL）
+tools/mkbadge.py        电子吧唧：任意图 → 466² RGB565（macOS + PIL）
 ```
 
 ## 构建 / 烧录
@@ -55,13 +68,34 @@ tools/genfont.py        字库烤制脚本（macOS + PIL）
 ```bash
 cd fw
 cp main/wifi_secret.h.example main/wifi_secret.h   # 填入你的 WiFi
-# 改 main/monita_main.c 里的 FACE_URL 指向你的数据源
+# 改 main/net.c 里的 FACE_URL 指向你的数据源
 idf.py set-target esp32s3
 idf.py -p <PORT> flash monitor
 ```
 
 > 数据出口：在 CPE 上放一个定时把蜂窝指标写成 JSON 的脚本（`/www/face.json`，字段见
 > `map_mood()`），ESP32 直接 `GET http://<网关>/face.json` 即可。
+
+## 电子吧唧（自定义图）
+
+往媒体页放一张自定义图（PNG/JPG 皆可）。设备端不解码——在 Mac 上烤成 RGB565，板子直接整屏推：
+
+```bash
+python3 tools/mkbadge.py 你的图.png badge.565
+cat badge.565 | ssh root@<网关> 'cat >/www/badge.565'   # 脚本会打印这行
+```
+
+翻到吧唧页即显示；停留 45s 自动回脸（AMOLED 防烧屏，脸才是常驻态）。换图重跑覆盖即可，不必重烧固件。
+
+## OTA 自更新（改完代码免插线）
+
+```bash
+# 改 version.h 里的 FW_VERSION +1，build
+idf.py build
+cat build/monita-fw.bin | ssh root@<网关> 'cat >/www/monita-fw.bin'
+echo -n <新版本号>       | ssh root@<网关> 'cat >/www/monita.ver'
+# 板子 15s 内自动发现 → 拉取 → 写备用槽 → 重启
+```
 
 ## 重新烤字库（可选）
 
@@ -75,7 +109,7 @@ python3 tools/genfont.py     # 需要 Pillow + 系统中文字体
 
 - [x] 浏览器原型（六态 + 待机动画）
 - [x] 点屏（CO5300 QSPI 驱动）
-- [x] 无口萌脸 + 眨眼 / 呼吸 / 瞟眼
+- [x] 没有嘴的脸 + 眨眼 / 呼吸 / 瞟眼
 - [x] 六种表情 + 腮红 / 汗 / 泪 + 中文气泡
 - [x] WiFi 连网 + 轮询 `face.json` + 数据驱动表情
 - [x] OTA 自更新（WiFi 拉固件，build → 拷 bin 到路由器 → 板子自升，告别 USB）
