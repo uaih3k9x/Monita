@@ -21,6 +21,9 @@
 
 static const char *TAG = "monita";
 
+#define BADGE_URL "http://192.168.2.254/badge.565"   // 电子吧唧（mkbadge.py 烤好的 466² RGB565）
+#define MEDIA_TIMEOUT_MS 45000                        // 媒体页停留上限（烧屏保护，自动回脸）
+
 static inline float frand(void) { return (float)esp_random() / (float)UINT32_MAX; }
 
 void app_main(void)
@@ -51,11 +54,12 @@ void app_main(void)
     int   next_gaze = 80, gaze_hold = 0; float gx = 0.0f, gaze_target = 0.0f;
 
     // 翻页 + 手势：快速轻点=翻页，长按≥300ms/滑动=摸头（区分开）
-    int   page = 0;                             // 0=脸 1=数值页
+    int   page = 0;                             // 0=脸 1=数值页 2=媒体页(电子吧唧)
     bool  page_dirty = false;
     bool  was_touch = false, moved = false;
     TickType_t down_t = 0; int down_x = 0, down_y = 0;
     int   stats_tick = 0;
+    TickType_t media_t0 = 0;
 
     // 被摸态合成表情（∩ 弯眼 + 强腮红）
     static const mood_t PET_LO = {"pet", EYE_HAPPY, 46, 32, 26, 1.0f, false, false, true, false, false, "好舒服~"};
@@ -68,7 +72,7 @@ void app_main(void)
         if (tnow && (abs(g_tx - down_x) > 40 || abs(g_ty - down_y) > 40)) moved = true;
         if (!tnow && was_touch) {                          // 松手
             if (!moved && (xTaskGetTickCount() - down_t) < pdMS_TO_TICKS(300)) {
-                page = (page + 1) % 2;                      // 快速轻点 → 翻页
+                page = (page + 1) % 3;                      // 快速轻点 → 翻页（脸→数值→吧唧→脸）
                 page_dirty = true;
                 pet = 0.0f;                                 // 翻页不算摸头
             }
@@ -93,6 +97,32 @@ void app_main(void)
             if ((stats_tick++ % 50) == 0) display_stats();
             t++;
             vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+
+        // ── 媒体页（电子吧唧）：进页时拉一张图显示，停留超时自动回脸（烧屏保护）──
+        if (page == 2) {
+            if (page_dirty) {
+                page_dirty = false;
+                display_bubble(""); display_battery(-1, false);
+                shown_bub[0] = 1; shown_bub[1] = 0; shown_bstate = -99;
+                media_t0 = xTaskGetTickCount();
+                display_clear();
+                display_message("载入吧唧…");
+                uint8_t *img = NULL;
+                int n = net_fetch(BADGE_URL, &img);
+                if (n > 0 && img) {
+                    if (!display_image(img, n)) display_message("吧唧尺寸不符");
+                    free(img);
+                } else {
+                    display_message("没找到 badge.565");
+                }
+            }
+            if ((int32_t)(xTaskGetTickCount() - media_t0) > (int32_t)pdMS_TO_TICKS(MEDIA_TIMEOUT_MS)) {
+                page = 0; page_dirty = true;               // 超时回脸
+            }
+            t++;
+            vTaskDelay(pdMS_TO_TICKS(50));
             continue;
         }
         if (page_dirty) page_dirty = false;                // 回到脸页：脸每帧都画，气泡靠 shown_bub 已重置

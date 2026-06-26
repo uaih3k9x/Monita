@@ -6,6 +6,7 @@
 #include "esp_netif.h"
 #include "esp_event.h"
 #include "esp_http_client.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "cJSON.h"
 #include <string.h>
@@ -67,4 +68,35 @@ void poll_task(void *arg)
         }
         vTaskDelay(pdMS_TO_TICKS(4000));
     }
+}
+
+// 下载整个文件到 PSRAM 缓冲（媒体页吧唧用）。返回字节数；*out 由调用方 free；失败返回 -1。
+int net_fetch(const char *url, uint8_t **out)
+{
+    *out = NULL;
+    esp_http_client_config_t cfg = { .url = url, .timeout_ms = 8000 };
+    esp_http_client_handle_t c = esp_http_client_init(&cfg);
+    if (!c) return -1;
+    int ret = -1;
+    if (esp_http_client_open(c, 0) == ESP_OK) {
+        int clen = esp_http_client_fetch_headers(c);
+        int status = esp_http_client_get_status_code(c);
+        if (status == 200) {
+            size_t cap = (clen > 0) ? (size_t)clen : (size_t)512 * 1024;
+            uint8_t *buf = heap_caps_malloc(cap, MALLOC_CAP_SPIRAM);
+            if (buf) {
+                int total = 0, n;
+                while (total < (int)cap &&
+                       (n = esp_http_client_read(c, (char *)buf + total, cap - total)) > 0)
+                    total += n;
+                if (total > 0) { *out = buf; ret = total; }
+                else heap_caps_free(buf);
+            }
+        } else {
+            ESP_LOGW(TAG, "fetch %s → HTTP %d", url, status);
+        }
+        esp_http_client_close(c);
+    }
+    esp_http_client_cleanup(c);
+    return ret;
 }

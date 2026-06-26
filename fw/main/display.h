@@ -2,6 +2,8 @@
 // 拥有面板句柄、PSRAM 缓冲、几何常量；对外只暴露高层"画什么"的接口。
 #pragma once
 #include <stdbool.h>
+#include <stdint.h>
+#include <stddef.h>
 #include "mood.h"               // mood_t
 
 #define LCD_W 466
@@ -13,3 +15,5 @@ void display_face(const mood_t *m, int t, float by, float gx, float openK);
 void display_bubble(const char *s);              // 空串=清气泡带
 void display_battery(int pct, bool charging);    // pct<0=清除
 void display_stats(void);                        // 数值页（标题含版本号 + 蜂窝指标）
+bool display_image(const uint8_t *raw, size_t len); // 媒体页：直接 blit 466×466 RGB565 原始数据
+void display_message(const char *s);             // 屏中央一行白字（载入/出错提示）

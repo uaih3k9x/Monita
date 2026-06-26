@@ -472,3 +472,20 @@ void display_face(const mood_t *m, int t, float by, float gx, float openK)
 void display_bubble(const char *s)         { draw_bubble(s); }
 void display_battery(int pct, bool charging) { draw_battery(pct, charging); }
 void display_stats(void)                   { draw_stats_page(); }
+
+// 媒体页：raw 必须是 LCD_W×LCD_H 的 RGB565（已按面板字节序大端烤好）→ 直接整屏推
+bool display_image(const uint8_t *raw, size_t len)
+{
+    if (len != (size_t)LCD_W * LCD_H * 2) { ESP_LOGW(TAG, "图尺寸不符 %u 字节", (unsigned)len); return false; }
+    blit_psram((const uint16_t *)raw, 0, 0, LCD_W, LCD_H);
+    return true;
+}
+
+// 屏中央一行白字（画进脸区域缓冲，居中）
+void display_message(const char *s)
+{
+    memset(g_face, 0x00, (size_t)RW * RH * 2);
+    int w = text_width(s);
+    draw_text(g_face, RW, RH, (RW - w) / 2, (RH - FONT_H) / 2, s, 0xFFFF);
+    blit_psram(g_face, RX0, RY0, RW, RH);
+}
