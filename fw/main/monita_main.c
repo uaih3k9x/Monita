@@ -1,4 +1,5 @@
-// 小圆脸固件 · Phase 3a：无口萌脸 六种眼神 + 待机动画
+// 模拟太 · Monita 固件（日常昵称「小圆脸」）
+// 名字取自《逆转裁判》希月心音的 モニ太——情绪随状态变、会替主人说心里话的胸挂小屏。
 // 显示：Waveshare ESP32-S3-Touch-AMOLED-1.75（CO5300 466x466 QSPI）
 #include <string.h>
 #include <stdio.h>
