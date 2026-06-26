@@ -25,8 +25,14 @@
 #include "esp_https_ota.h"
 #include "esp_ota_ops.h"
 #include "driver/i2c_master.h"
+#include "driver/gpio.h"
 #include "cJSON.h"
 #include "font_cjk.h"
+
+// ── 触摸 CST9217（与 AXP 共用 I2C：SDA15/SCL14，地址 0x5A，RST40/INT11）──
+#define TP_ADDR  0x5A
+#define TP_RST   40
+#define TP_INT   11
 
 static const char *TAG = "monita";
 
@@ -35,7 +41,7 @@ static const char *TAG = "monita";
 #define FACE_URL  "http://192.168.2.254/face.json"
 
 // ── OTA（终结 USB 烧录痛苦：之后只需 build → 拷 bin 到路由器 /www → 板子自更新）──
-#define FW_VERSION   5                                       // 每次发版 +1
+#define FW_VERSION   8                                       // 每次发版 +1
 #define OTA_VER_URL  "http://192.168.2.254/monita.ver"       // 内容是个数字
 #define OTA_BIN_URL  "http://192.168.2.254/monita-fw.bin"
 
@@ -486,6 +492,7 @@ static inline float frand(void) { return (float)esp_random() / (float)UINT32_MAX
 static volatile int  g_batt = -1;        // 电池百分比（-1=未知）
 static volatile bool g_charging = false;
 static i2c_master_dev_handle_t s_axp;
+static i2c_master_bus_handle_t s_i2c_bus;   // AXP 与触摸共用
 
 static esp_err_t axp_rd(uint8_t reg, uint8_t *val)
 {
@@ -499,10 +506,9 @@ static void axp_init(void)
         .clk_source = I2C_CLK_SRC_DEFAULT, .glitch_ignore_cnt = 7,
         .flags.enable_internal_pullup = true,
     };
-    i2c_master_bus_handle_t bus;
-    if (i2c_new_master_bus(&bc, &bus) != ESP_OK) { ESP_LOGW(TAG, "I2C 建失败"); return; }
+    if (i2c_new_master_bus(&bc, &s_i2c_bus) != ESP_OK) { ESP_LOGW(TAG, "I2C 建失败"); return; }
     i2c_device_config_t dc = { .dev_addr_length = I2C_ADDR_BIT_LEN_7, .device_address = AXP_ADDR, .scl_speed_hz = 400000 };
-    if (i2c_master_bus_add_device(bus, &dc, &s_axp) != ESP_OK) { ESP_LOGW(TAG, "AXP2101 挂载失败"); s_axp = NULL; return; }
+    if (i2c_master_bus_add_device(s_i2c_bus, &dc, &s_axp) != ESP_OK) { ESP_LOGW(TAG, "AXP2101 挂载失败"); s_axp = NULL; return; }
     uint8_t id = 0, s0 = 0, s1 = 0, pct = 0xFF;
     axp_rd(0x03, &id); axp_rd(0x00, &s0); axp_rd(0x01, &s1); axp_rd(0xA4, &pct);
     ESP_LOGI(TAG, "AXP2101 id=0x%02x status0=0x%02x status1=0x%02x batt(0xA4)=%d", id, s0, s1, pct);
@@ -513,6 +519,83 @@ static void axp_read(void)
     uint8_t pct = 0xFF, st = 0;
     if (axp_rd(0xA4, &pct) == ESP_OK && pct <= 100) g_batt = pct;
     if (axp_rd(0x00, &st) == ESP_OK) g_charging = (st & 0x20) != 0;   // bit5 ≈ VBUS/充电（先这样，看 dump 再校）
+}
+
+// ── 触摸 CST9217（自写极简版，复用 s_i2c_bus）──
+static i2c_master_dev_handle_t s_tp;
+static volatile bool g_touched = false;
+static volatile int  g_tx = 0, g_ty = 0;
+
+static esp_err_t tp_rd(uint16_t reg, uint8_t *data, size_t len)
+{
+    if (!s_tp) return ESP_FAIL;
+    uint8_t rb[2] = { (uint8_t)(reg >> 8), (uint8_t)(reg & 0xFF) };
+    if (i2c_master_transmit(s_tp, rb, 2, 100) != ESP_OK) return ESP_FAIL;
+    vTaskDelay(pdMS_TO_TICKS(2));
+    return i2c_master_receive(s_tp, data, len, 100);
+}
+
+// 写 16 位寄存器：先写地址，再写值（两段事务，与官方驱动一致）
+static esp_err_t tp_wr(uint16_t reg, const uint8_t *val, size_t vlen)
+{
+    if (!s_tp) return ESP_FAIL;
+    uint8_t a[2] = { (uint8_t)(reg >> 8), (uint8_t)(reg & 0xFF) };
+    if (i2c_master_transmit(s_tp, a, 2, 100) != ESP_OK) return ESP_FAIL;
+    vTaskDelay(pdMS_TO_TICKS(2));
+    return i2c_master_transmit(s_tp, val, vlen, 100);
+}
+
+static void tp_init(void)
+{
+    if (!s_i2c_bus) return;
+    gpio_config_t rc = { .pin_bit_mask = BIT64(TP_RST), .mode = GPIO_MODE_OUTPUT };
+    gpio_config(&rc);
+    gpio_config_t ic = { .pin_bit_mask = BIT64(TP_INT), .mode = GPIO_MODE_INPUT };
+    gpio_config(&ic);
+    gpio_set_level(TP_RST, 0); vTaskDelay(pdMS_TO_TICKS(10));
+    gpio_set_level(TP_RST, 1); vTaskDelay(pdMS_TO_TICKS(50));
+    i2c_device_config_t dc = { .dev_addr_length = I2C_ADDR_BIT_LEN_7, .device_address = TP_ADDR, .scl_speed_hz = 400000 };
+    if (i2c_master_bus_add_device(s_i2c_bus, &dc, &s_tp) != ESP_OK) { s_tp = NULL; ESP_LOGW(TAG, "触摸挂载失败"); return; }
+
+    // 初始化握手（照官方驱动 read_config）：进命令模式 + 读校验码/分辨率
+    uint8_t cm[2] = { 0xD1, 0x01 };
+    tp_wr(0xD101, cm, 2);  vTaskDelay(pdMS_TO_TICKS(10));
+    uint8_t cc[4] = {0}, rs[4] = {0};
+    tp_rd(0xD1FC, cc, 4);  // checkcode
+    tp_rd(0xD1F8, rs, 4);  // resolution
+    ESP_LOGI(TAG, "CST9217 checkcode=%02X%02X%02X%02X 分辨率=%dx%d",
+             cc[0], cc[1], cc[2], cc[3], (rs[1] << 8) | rs[0], (rs[3] << 8) | rs[2]);
+
+    uint8_t d[10] = {0};
+    esp_err_t r = tp_rd(0xD000, d, sizeof(d));     // 自检：ack 应为 0xAB
+    ESP_LOGI(TAG, "CST9217 自检 rd=%s ack=0x%02X points=%d", r == ESP_OK ? "OK" : "FAIL", d[6], d[5] & 0x7F);
+}
+
+static bool tp_read(int *x, int *y)
+{
+    uint8_t d[10] = {0};
+    if (tp_rd(0xD000, d, sizeof(d)) != ESP_OK) return false;
+    if (d[6] != 0xAB) return false;
+    if ((d[5] & 0x7F) < 1) return false;
+    if ((d[0] & 0x0F) != 0x06) return false;
+    *x = (d[1] << 4) | (d[3] >> 4);
+    *y = (d[2] << 4) | (d[3] & 0x0F);
+    return true;
+}
+
+static void touch_task(void *arg)
+{
+    bool was = false; int cnt = 0;
+    while (true) {
+        int x = 0, y = 0;
+        bool t = tp_read(&x, &y);
+        if (t) { g_tx = x; g_ty = y; }
+        if (t && !was) ESP_LOGI(TAG, "↓ 摸到 x=%d y=%d", x, y);
+        else if (!t && was) ESP_LOGI(TAG, "↑ 松手");
+        else if (t && (++cnt % 15 == 0)) ESP_LOGI(TAG, "… 摸 x=%d y=%d", x, y);
+        g_touched = t; was = t;
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
 }
 
 // ── OTA ──
@@ -666,30 +749,51 @@ void app_main(void)
     clear_screen(panel);
     draw_bubble(panel, g_bub, MOODS[M_HAPPY].bubble);
 
-    axp_init();                 // 电源管理芯片（后台读电量；电量条改到摸头时才显示 → Phase C）
+    axp_init();                 // 电源管理芯片（后台读电量）
     axp_read();
+    tp_init();                  // 触摸（摸摸头）
 
     // 联网 + 轮询 face.json + OTA 自更新
     esp_err_t nr = nvs_flash_init();
     if (nr == ESP_ERR_NVS_NO_FREE_PAGES || nr == ESP_ERR_NVS_NEW_VERSION_FOUND) { nvs_flash_erase(); nvs_flash_init(); }
     wifi_start();
-    xTaskCreate(poll_task, "poll", 8192, NULL, 4, NULL);
-    xTaskCreate(ota_task,  "ota",  8192, NULL, 3, NULL);
+    xTaskCreate(poll_task,  "poll",  8192, NULL, 4, NULL);
+    xTaskCreate(ota_task,   "ota",   8192, NULL, 3, NULL);
+    xTaskCreate(touch_task, "touch", 4096, NULL, 5, NULL);   // 触摸读取（高优先级，响应快）
     ESP_LOGI(TAG, "固件版本 v%d", FW_VERSION);
     ESP_LOGI(TAG, "Phase 5：连 %s → 轮询 %s 驱动表情", WIFI_SSID, FACE_URL);
 
     int   t = 0;
-    int   shown = -1;
+    const char *shown_bub = (const char *)1;   // 已显示的气泡（强制首帧画）
+    int   shown_bstate = -99;
+    float pet = 0.0f;                          // 摸摸头愉悦度
     int   next_blink = 50; float blink = 0.0f;
     int   next_gaze = 80, gaze_hold = 0; float gx = 0.0f, gaze_target = 0.0f;
 
+    // 被摸态合成表情（∩ 弯眼 + 强腮红）
+    static const mood_t PET_LO = {"pet", EYE_HAPPY, 46, 32, 26, 1.0f, false, false, true, false, false, "好舒服~"};
+    static const mood_t PET_HI = {"pet", EYE_HAPPY, 48, 30, 28, 1.0f, false, false, true, false, false, "再摸摸~"};
+
     while (true) {
-        int mi = g_mood;                       // poll 任务按 face.json 设置
-        const mood_t *m = &MOODS[mi];
-        if (mi != shown) {                     // 表情变了 → 刷气泡
-            shown = mi;
+        // 摸摸头：愉悦度累积/衰减
+        if (g_touched) pet += 0.06f; else pet -= 0.025f;
+        if (pet < 0.0f) pet = 0.0f; else if (pet > 1.3f) pet = 1.3f;
+        const bool petting = pet > 0.18f;
+
+        const mood_t *m = petting ? (pet > 0.75f ? &PET_HI : &PET_LO) : &MOODS[g_mood];
+
+        if (m->bubble != shown_bub) {          // 台词变了 → 刷气泡
+            shown_bub = m->bubble;
             draw_bubble(panel, g_bub, m->bubble);
-            ESP_LOGI(TAG, "mood=%s net=%d", m->name, (int)g_net);
+            ESP_LOGI(TAG, "%s%s net=%d", petting ? "摸→" : "mood=", m->name, (int)g_net);
+        }
+
+        // 电量：摸头时亮出，松手清掉
+        int bstate = petting ? (g_batt * 4 + (g_charging ? 1 : 0)) : -1;
+        if (bstate != shown_bstate) {
+            shown_bstate = bstate;
+            if (petting) { axp_read(); draw_battery(panel, g_batt, g_charging); }
+            else draw_battery(panel, -1, false);
         }
 
         // 眨眼（仅启用 blink 的表情）
@@ -715,9 +819,16 @@ void app_main(void)
         if (gaze_hold > 0 && --gaze_hold == 0) gaze_target = 0.0f;
         gx += (gaze_target - gx) * 0.18f;
 
-        // 抖（offline 断网发抖）
-        float gx_eff = gx;
-        if (m->shake) gx_eff += sinf((float)t * 0.9f) * 3.0f;
+        // 朝向：被摸时朝手指蹭；否则正常瞟眼/抖
+        float gx_eff;
+        if (petting) {
+            float lean = (g_tx - CXC) * 0.16f;
+            if (lean > 16.0f) lean = 16.0f; else if (lean < -16.0f) lean = -16.0f;
+            gx_eff = lean;
+        } else {
+            gx_eff = gx;
+            if (m->shake) gx_eff += sinf((float)t * 0.9f) * 3.0f;
+        }
 
         draw_face_frame(panel, g_face, m, t, by, gx_eff, openK);
 
