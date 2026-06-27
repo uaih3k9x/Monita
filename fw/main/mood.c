@@ -37,6 +37,9 @@ static long jnum(cJSON *o, const char *k, long def)
 // face.json → mood：情绪两轴
 //   吞吐轴 = 忙不忙（迟滞：进 >250k / 退 <120k）
 //   信号轴 = 舒不舒服（grin / happy / 蔫），三档各留死区迟滞；模组瞬时无效读数沿用上一拍
+static TickType_t s_motion_t = 0;    // 最近一次 IMU 运动时间戳
+void mood_note_motion(void) { s_motion_t = xTaskGetTickCount(); }
+
 static bool s_busy = false;          // 吞吐忙碌迟滞态
 static int  s_sig  = M_HAPPY;        // 信号档迟滞态（grin/happy/wilt）
 static long s_rsrp = -90, s_sinr = 10;  // 上一拍有效信号（滤无效用）
@@ -95,7 +98,7 @@ void mood_update(cJSON *j)
 
     // E4 久闲→sleepy：信号好(grin/happy) + 吞吐持续很低 ~5min
     static int idle_polls = 0;
-    if (g_touched) idle_polls = 0;
+    if (g_touched || (xTaskGetTickCount() - s_motion_t) < pdMS_TO_TICKS(8000)) idle_polls = 0;
     else if ((target == M_HAPPY || target == M_GRIN) && thr < 20000) {
         if (idle_polls < 9999) idle_polls++;
     } else idle_polls = 0;

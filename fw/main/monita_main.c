@@ -58,6 +58,7 @@ void app_main(void)
     int   next_blink = 50; float blink = 0.0f;
     int   next_gaze = 80, gaze_hold = 0; float gx = 0.0f, gaze_target = 0.0f;
     float tilt = 0.0f;                          // 重力倾斜(IMU)→眼神横偏，低通平滑
+    bool  moving_prev = false; TickType_t shake_cd = 0;   // 运动检测（唤醒/摇一摇）
 
     // 翻页 + 手势：快速轻点=翻页，长按≥300ms/滑动=摸头（区分开）
     int   page = 0;                             // 0=脸 1=数值页 2=媒体页(电子吧唧)
@@ -192,12 +193,28 @@ void app_main(void)
         if (gaze_hold > 0 && --gaze_hold == 0) gaze_target = 0.0f;
         gx += (gaze_target - gx) * 0.18f;
 
-        // 重力倾斜：板子歪了眼神朝低处偏（IMU 在线才有；低通+死区，静止不抖）
+        // IMU：重力倾斜眼神 + 拿起唤醒 + 摇一摇
         float ax, ay, az;
         if (g_imu_ok && imu_read(&ax, &ay, &az)) {
-            float target = ax * 34.0f;
+            float target = ay * 34.0f;                    // 左右倾(ay) → 眼神横偏
             if (target > 17.0f) target = 17.0f; else if (target < -17.0f) target = -17.0f;
             tilt += (target - tilt) * 0.15f;
+
+            float mot = fabsf(sqrtf(ax * ax + ay * ay + az * az) - 1.0f);   // 偏离 1g = 运动量
+            bool moving = mot > 0.06f;
+            if (moving) mood_note_motion();               // 有动静 → 不打盹/解除久闲
+            TickType_t now = xTaskGetTickCount();
+            if (mot > 0.55f && (int32_t)(now - shake_cd) > 0) {            // 摇一摇 → 哇！
+                g_evt_mood = M_SURPRISED; strcpy(g_evt_bub, "哇！");
+                g_evt_until = now + pdMS_TO_TICKS(2000);
+                shake_cd = now + pdMS_TO_TICKS(2500);
+            } else if (moving && !moving_prev && g_mood == M_SLEEPY &&
+                       (int32_t)(now - shake_cd) > 0) {                    // 打盹时拿起 → 醒
+                g_evt_mood = M_SURPRISED; strcpy(g_evt_bub, "唔…？");
+                g_evt_until = now + pdMS_TO_TICKS(1500);
+                shake_cd = now + pdMS_TO_TICKS(1800);
+            }
+            moving_prev = moving;
         }
         float tg = (fabsf(tilt) < 2.0f) ? 0.0f : tilt;   // 死区，去静止噪声
 
