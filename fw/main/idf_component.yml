@@ -15,3 +15,4 @@ dependencies:
   #   # All dependencies of `main` are public by default.
   #   public: true
   espressif/esp_lcd_co5300: '*'
+  lvgl/lvgl: ^9.2.0

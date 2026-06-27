@@ -19,6 +19,7 @@
 #include "ota.h"                 // ota_task（OTA 自更新）
 #include "mood.h"                // 情绪模型 + MOODS + 共享情绪状态
 #include "version.h"             // FW_VERSION
+#include "lvgl_ui.h"             // LVGL 设置页（本分支）
 
 static const char *TAG = "monita";
 
@@ -41,6 +42,7 @@ void app_main(void)
     power_read();
     touch_init();               // 触摸（摸摸头）
     imu_init();                 // QMI8658 IMU（重力倾斜）
+    lvgl_init();                // LVGL（设置页用，分时复用面板）
 
     // 联网 + 轮询 face.json + OTA 自更新
     esp_err_t nr = nvs_flash_init();
@@ -69,9 +71,6 @@ void app_main(void)
     TickType_t media_t0 = 0;
     uint8_t *media = NULL; int media_w = 0, media_h = 0, media_nf = 0, media_fi = 0;  // 媒体页(.m8g)播放
     TickType_t media_next = 0;
-    int  user_bright = BRIGHT_NORMAL;          // 设置页亮度滑块控制的常态亮度
-    bool st_dirty = false, btn_hot = false;    // 设置页待重画 / 按钮高亮
-    char st_ssid[40] = "", st_ip[20] = ""; int st_rssi = 0, st_tick = 0;
 
     // 省电：按需渲染（画面没真变化就不重画）+ 亮度
     const mood_t *last_m = NULL;
@@ -89,11 +88,7 @@ void app_main(void)
         if (tnow && (abs(g_tx - down_x) > 40 || abs(g_ty - down_y) > 40)) moved = true;
         if (!tnow && was_touch) {                          // 松手
             bool tap = !moved && (xTaskGetTickCount() - down_t) < pdMS_TO_TICKS(300);
-            if (page == 3) {                                // 设置页：命中按钮/空白处理
-                int r = display_settings_hit(down_x, down_y, NULL);
-                if (r == 2) { if (media) { free(media); media = NULL; media_nf = 0; } st_dirty = true; }  // 刷新吧唧
-                else if (tap && r == 0) { page = 0; page_dirty = true; }                                  // 空白轻点回脸
-            } else if (tap) {
+            if (page != 3 && tap) {                         // 设置页交给 LVGL；其余轻点翻页
                 page = (page + 1) % 4;                      // 脸→数值→吧唧→设置→脸
                 page_dirty = true;
                 pet = 0.0f;                                 // 翻页不算摸头
@@ -163,28 +158,18 @@ void app_main(void)
             vTaskDelay(pdMS_TO_TICKS(15));
             continue;
         }
-        // ── 设置页：亮度滑块 + 刷新吧唧 + WiFi 信息（手搓）──
+        // ── 设置页（LVGL）：脸/数值/媒体仍裸渲染，这页交给 LVGL，分时复用面板 ──
         if (page == 3) {
             if (page_dirty) {
                 page_dirty = false;
                 display_bubble(""); display_battery(-1, false);
                 shown_bub[0] = 1; shown_bub[1] = 0; shown_bstate = -99;
-                display_clear(); st_dirty = true; st_tick = 0;
+                display_clear();
+                lvgl_enter();                              // 标脏全屏，强制重画
             }
-            // 滑块拖动 live 调亮度 + 按钮高亮
-            if (tnow) {
-                int b, r = display_settings_hit(g_tx, g_ty, &b);
-                if (r == 1 && b != user_bright) { user_bright = b; display_brightness(b); st_dirty = true; }
-                bool hot = (r == 2);
-                if (hot != btn_hot) { btn_hot = hot; st_dirty = true; }
-            } else if (btn_hot) { btn_hot = false; st_dirty = true; }
-            if ((st_tick++ % 40) == 0) {                 // 定期刷 WiFi 信息
-                char ns[40], nip[20]; int nr; net_info(ns, sizeof ns, nip, sizeof nip, &nr);
-                if (strcmp(ns, st_ssid) || strcmp(nip, st_ip) || nr != st_rssi) {
-                    strcpy(st_ssid, ns); strcpy(st_ip, nip); st_rssi = nr; st_dirty = true;
-                }
-            }
-            if (st_dirty) { st_dirty = false; display_settings(user_bright, st_ssid, st_ip, st_rssi, btn_hot); }
+            lvgl_tick();                                   // 驱动 LVGL 渲染 + 输入
+            if (g_badge_refresh) { g_badge_refresh = false; if (media) { free(media); media = NULL; media_nf = 0; } }
+            if (g_lvgl_exit)     { g_lvgl_exit = false; page = 0; page_dirty = true; }
             t++;
             vTaskDelay(pdMS_TO_TICKS(15));
             continue;
@@ -286,7 +271,7 @@ void app_main(void)
         }
 
         // 亮度：sleepy 且非摸头 → 暗；否则常态
-        int wantb = (!petting && m == &MOODS[M_SLEEPY]) ? BRIGHT_SLEEPY : user_bright;
+        int wantb = (!petting && m == &MOODS[M_SLEEPY]) ? BRIGHT_SLEEPY : g_user_bright;
         if (wantb != cur_bright) { display_brightness(wantb); cur_bright = wantb; }
 
         // 省电·按需渲染：画面实际没变（呼吸没跨像素/没眨眼/没瞟动/配件没落/没换表情）就不重画
