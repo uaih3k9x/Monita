@@ -33,26 +33,37 @@ static long jnum(cJSON *o, const char *k, long def)
 }
 
 // face.json → mood：情绪两轴
-//   吞吐轴 = 忙不忙（迟滞：进 >250k / 退 <120k，别在边界抖）
-//   信号轴 = 舒不舒服（grin / happy / 蔫）
-static bool s_busy = false;       // 吞吐忙碌迟滞态（跨轮询保留）
+//   吞吐轴 = 忙不忙（迟滞：进 >250k / 退 <120k）
+//   信号轴 = 舒不舒服（grin / happy / 蔫），三档各留死区迟滞；模组瞬时无效读数沿用上一拍
+static bool s_busy = false;          // 吞吐忙碌迟滞态
+static int  s_sig  = M_HAPPY;        // 信号档迟滞态（grin/happy/wilt）
+static long s_rsrp = -90, s_sinr = 10;  // 上一拍有效信号（滤无效用）
 
 static int map_mood(cJSON *j)
 {
     if (jnum(j, "online", 1) == 0) return M_OFFLINE;          // 断网（最高优先）
     long dl = jnum(j, "dl_bps", 0), ul = jnum(j, "ul_bps", 0);
-    long sinr = jnum(j, "sinr", 99), rsrp = jnum(j, "rsrp", -50);
     long thr = dl + ul;
 
+    // 滤无效：rsrp 必须落在合理范围(-150..-30)，否则沿用上一拍（模组会瞬时报 0/异常）
+    long rr = jnum(j, "rsrp", 0), ss = jnum(j, "sinr", 99);
+    if (rr <= -30 && rr >= -150) { s_rsrp = rr; s_sinr = ss; }
+    long rsrp = s_rsrp, sinr = s_sinr;
+
     // 吞吐轴：忙碌迟滞
-    if (s_busy) { if (thr < 120000) s_busy = false; }        // 退忙
-    else        { if (thr > 250000) s_busy = true;  }        // 进忙
+    if (s_busy) { if (thr < 120000) s_busy = false; }
+    else        { if (thr > 250000) s_busy = true;  }
     if (s_busy) return M_BUSY;
 
-    // 信号轴：底噪心情
-    if (sinr >= 12 || rsrp >= -90) return M_GRIN;            // 信号美滋滋
-    if (sinr <  6  && rsrp < -105) return M_WILT;            // 信号差 → 蔫(眯眼无汗)
-    return M_HAPPY;                                           // 中间
+    // 信号轴：三档迟滞，边界各留死区，临界不闪
+    switch (s_sig) {
+        case M_GRIN: if (rsrp < -95 && sinr < 10) s_sig = M_HAPPY; break;   // 跌出美滋滋
+        case M_WILT: if (rsrp > -100 || sinr > 8) s_sig = M_HAPPY; break;   // 缓过来
+        default:     if (rsrp >= -90 || sinr >= 12)      s_sig = M_GRIN;    // 升到美滋滋
+                     else if (rsrp < -107 && sinr < 5)   s_sig = M_WILT;    // 跌到蔫
+                     break;
+    }
+    return s_sig;
 }
 
 void mood_update(cJSON *j)

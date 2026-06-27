@@ -138,13 +138,18 @@ void app_main(void)
         // 事件覆盖：poll 触发的临时表情（载波/制式/上线），TTL 内盖住稳态
         const bool evt = (g_evt_until != 0) &&
                          ((int32_t)(xTaskGetTickCount() - g_evt_until) < 0);
+        const bool offline = !g_net;     // WiFi 连不上网关 → 挂了
 
         const mood_t *m = petting ? (pet > 0.75f ? &PET_HI : &PET_LO)
+                        : offline ? &MOODS[M_OFFLINE]
                         : evt     ? &MOODS[g_evt_mood]
                                   : &MOODS[g_mood];
 
-        // 想显示的气泡：摸头用合成台词，事件用事件气泡，否则用网络层动态气泡
-        const char *want = petting ? m->bubble : evt ? g_evt_bub : g_dyn_bub;
+        // 想显示的气泡：摸头合成台词 / 连不上 / 事件 / 网络层动态气泡
+        const char *want = petting ? m->bubble
+                         : offline ? "连不上…"
+                         : evt     ? g_evt_bub
+                                   : g_dyn_bub;
 
         if (strncmp(want, shown_bub, sizeof shown_bub) != 0) {   // 台词变了 → 刷气泡
             strncpy(shown_bub, want, sizeof shown_bub - 1);
