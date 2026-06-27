@@ -14,6 +14,7 @@
 #include "i2c_bus.h"             // 共享 I2C 总线（电量 + 触摸）
 #include "power.h"               // AXP2101 电量（g_batt / g_charging / power_read）
 #include "touch.h"               // CST9217 触摸（g_touched / g_tx / g_ty / touch_task）
+#include "imu.h"                 // QMI8658 IMU（重力倾斜 → 眼神）
 #include "net.h"                 // wifi_start / poll_task / g_net
 #include "ota.h"                 // ota_task（OTA 自更新）
 #include "mood.h"                // 情绪模型 + MOODS + 共享情绪状态
@@ -39,6 +40,7 @@ void app_main(void)
     power_init();               // 电源管理芯片（AXP2101，后台读电量）
     power_read();
     touch_init();               // 触摸（摸摸头）
+    imu_init();                 // QMI8658 IMU（重力倾斜）
 
     // 联网 + 轮询 face.json + OTA 自更新
     esp_err_t nr = nvs_flash_init();
@@ -55,6 +57,7 @@ void app_main(void)
     float pet = 0.0f;                          // 摸摸头愉悦度
     int   next_blink = 50; float blink = 0.0f;
     int   next_gaze = 80, gaze_hold = 0; float gx = 0.0f, gaze_target = 0.0f;
+    float tilt = 0.0f;                          // 重力倾斜(IMU)→眼神横偏，低通平滑
 
     // 翻页 + 手势：快速轻点=翻页，长按≥300ms/滑动=摸头（区分开）
     int   page = 0;                             // 0=脸 1=数值页 2=媒体页(电子吧唧)
@@ -189,14 +192,23 @@ void app_main(void)
         if (gaze_hold > 0 && --gaze_hold == 0) gaze_target = 0.0f;
         gx += (gaze_target - gx) * 0.18f;
 
-        // 朝向：被摸时朝手指蹭；否则正常瞟眼/抖
+        // 重力倾斜：板子歪了眼神朝低处偏（IMU 在线才有；低通+死区，静止不抖）
+        float ax, ay, az;
+        if (g_imu_ok && imu_read(&ax, &ay, &az)) {
+            float target = ax * 34.0f;
+            if (target > 17.0f) target = 17.0f; else if (target < -17.0f) target = -17.0f;
+            tilt += (target - tilt) * 0.15f;
+        }
+        float tg = (fabsf(tilt) < 2.0f) ? 0.0f : tilt;   // 死区，去静止噪声
+
+        // 朝向：被摸时朝手指蹭；否则正常瞟眼/抖 + 重力偏
         float gx_eff;
         if (petting) {
             float lean = (g_tx - LCD_W / 2) * 0.16f;
             if (lean > 16.0f) lean = 16.0f; else if (lean < -16.0f) lean = -16.0f;
             gx_eff = lean;
         } else {
-            gx_eff = gx;
+            gx_eff = gx + tg;
             if (m->shake) gx_eff += sinf((float)t * 0.9f) * 3.0f;
         }
 
