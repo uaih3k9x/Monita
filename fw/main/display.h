@@ -17,5 +17,6 @@ void display_battery(int pct, bool charging);    // pct<0=清除
 void display_stats(void);                        // 数值页（标题含版本号 + 蜂窝指标）
 bool display_image(const uint8_t *raw, size_t len); // 媒体页：直接 blit 466×466 RGB565 原始数据
 void display_blit(const uint8_t *px, int x, int y, int w, int h);  // 把 w×h RGB565 块推到 (x,y)（媒体帧）
+void display_blit_fit(const uint8_t *px, int w, int h);            // 最近邻放大铺满屏（媒体帧：小源大显示）
 void display_message(const char *s);             // 屏中央一行白字（载入/出错提示）
 void display_brightness(int pct);                // 面板亮度 0–100（省电）

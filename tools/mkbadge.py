@@ -6,8 +6,9 @@
 import sys, struct
 from PIL import Image
 
-src = sys.argv[1] if len(sys.argv) > 1 else "badge.gif"
-out = sys.argv[2] if len(sys.argv) > 2 else "badge.m8g"
+src  = sys.argv[1] if len(sys.argv) > 1 else "badge.gif"
+out  = sys.argv[2] if len(sys.argv) > 2 else "badge.m8g"
+size = int(sys.argv[3]) if len(sys.argv) > 3 else 0   # 可选：强制输出边长（动图省 PSRAM 用）
 
 im = Image.open(src)
 frames, durs = [], []           # 逐帧抽取（seek 让 PIL 自动合成 GIF 的部分帧/disposal）
@@ -20,7 +21,7 @@ while True:
     i += 1
 nf = len(frames)
 
-W = H = 466 if nf == 1 else 300   # 静态铺满，动图缩到 300 居中（省空间/帧率）
+W = H = size if size else (466 if nf == 1 else 300)   # 指定优先；否则静态铺满 466、动图 300
 
 def to565(fr):
     f = fr.copy(); f.thumbnail((W, H), Image.LANCZOS)

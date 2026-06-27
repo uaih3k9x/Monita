@@ -122,27 +122,28 @@ void app_main(void)
                 shown_bub[0] = 1; shown_bub[1] = 0; shown_bstate = -99;
                 media_t0 = xTaskGetTickCount();
                 display_clear();
-                display_message("载入吧唧…");
-                if (media) { free(media); media = NULL; }
-                media_nf = 0; media_fi = 0;
-                uint8_t *buf = NULL;
-                int n = net_fetch(BADGE_URL, &buf);
-                if (n > 16 && buf[0] == 'M' && buf[1] == '8' && buf[2] == 'G' && buf[3] == '1') {
-                    int w = buf[4] | (buf[5] << 8), h = buf[6] | (buf[7] << 8), nf = buf[8] | (buf[9] << 8);
-                    long need = 12 + (long)nf * (2 + (long)w * h * 2);
-                    if (w > 0 && h > 0 && w <= LCD_W && h <= LCD_H && nf > 0 && need <= n) {
-                        media = buf; media_w = w; media_h = h; media_nf = nf;
-                        media_fi = 0; media_next = xTaskGetTickCount();
-                        display_clear();
-                    } else { free(buf); display_message("吧唧格式不符"); }
-                } else { if (buf) free(buf); display_message("没找到 badge.m8g"); }
+                if (media_nf > 0) {                    // 已缓存 → 秒开，从头播
+                    media_fi = 0; media_next = xTaskGetTickCount();
+                } else {                               // 首次进页 → 拉取并解析
+                    display_message("载入吧唧…");
+                    uint8_t *buf = NULL;
+                    int n = net_fetch(BADGE_URL, &buf);
+                    if (n > 16 && buf[0] == 'M' && buf[1] == '8' && buf[2] == 'G' && buf[3] == '1') {
+                        int w = buf[4] | (buf[5] << 8), h = buf[6] | (buf[7] << 8), nf = buf[8] | (buf[9] << 8);
+                        long need = 12 + (long)nf * (2 + (long)w * h * 2);
+                        if (w > 0 && h > 0 && w <= LCD_W && h <= LCD_H && nf > 0 && need <= n) {
+                            media = buf; media_w = w; media_h = h; media_nf = nf;
+                            media_fi = 0; media_next = xTaskGetTickCount();
+                        } else { free(buf); display_message("吧唧格式不符"); }
+                    } else { if (buf) free(buf); display_message("没找到 badge.m8g"); }
+                }
             }
             if (media_nf > 0) {                            // 逐帧播放（到点才换帧）
                 TickType_t now = xTaskGetTickCount();
                 if ((int32_t)(now - media_next) >= 0) {
                     const uint8_t *fp = media + 12 + (size_t)media_fi * (2 + (size_t)media_w * media_h * 2);
                     int delay = fp[0] | (fp[1] << 8);
-                    display_blit(fp + 2, (LCD_W - media_w) / 2, (LCD_H - media_h) / 2, media_w, media_h);
+                    display_blit_fit(fp + 2, media_w, media_h);   // 放大铺满屏
                     media_next = now + pdMS_TO_TICKS(delay < 20 ? 20 : delay);
                     media_fi = (media_fi + 1) % media_nf;
                 }
@@ -154,7 +155,7 @@ void app_main(void)
             vTaskDelay(pdMS_TO_TICKS(15));
             continue;
         }
-        if (media) { free(media); media = NULL; media_nf = 0; }   // 离开媒体页释放缓冲
+        // 离开媒体页：不释放，缓存留 PSRAM，下次进页秒开
         if (page_dirty) { display_clear(); page_dirty = false; last_m = NULL; }  // 回脸：整屏清残留并强制重画一帧
 
         // 事件覆盖：poll 触发的临时表情（载波/制式/上线），TTL 内盖住稳态

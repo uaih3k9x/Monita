@@ -526,6 +526,30 @@ void display_blit(const uint8_t *px, int x, int y, int w, int h)
     blit_psram((const uint16_t *)px, x, y, w, h);
 }
 
+// 把 w×h 帧最近邻放大到 ~MEDIA_FILL 居中铺满（媒体页：小源大显示）
+#define MEDIA_FILL 440
+void display_blit_fit(const uint8_t *px, int w, int h)
+{
+    const uint16_t *src = (const uint16_t *)px;
+    int den = (w > h ? w : h);
+    int ow = w * MEDIA_FILL / den, oh = h * MEDIA_FILL / den;
+    if (ow > LCD_W) ow = LCD_W;
+    if (oh > LCD_H) oh = LCD_H;
+    int offx = (LCD_W - ow) / 2, offy = (LCD_H - oh) / 2;
+    static int sxlut[LCD_W];
+    for (int ox = 0; ox < ow; ox++) { int sx = ox * w / ow; sxlut[ox] = sx < w ? sx : w - 1; }
+    for (int oy0 = 0; oy0 < oh; oy0 += FACE_CHUNK) {
+        int rows = (oy0 + FACE_CHUNK <= oh) ? FACE_CHUNK : (oh - oy0);
+        for (int r = 0; r < rows; r++) {
+            int sy = (oy0 + r) * h / oh; if (sy >= h) sy = h - 1;
+            const uint16_t *srow = src + (size_t)sy * w;
+            uint16_t *drow = g_chunk + (size_t)r * ow;
+            for (int ox = 0; ox < ow; ox++) drow[ox] = srow[sxlut[ox]];
+        }
+        safe_blit(offx, offy + oy0, offx + ow, offy + oy0 + rows, g_chunk);
+    }
+}
+
 // 屏中央一行白字（画进脸区域缓冲，居中）
 void display_message(const char *s)
 {
