@@ -372,7 +372,43 @@ static void draw_battery(int pct, bool charging)
     blit_psram(g_top, TOPX, TOPY, TOPW, TOPH);
 }
 
-// 数值页：标题(含版本号) + 蜂窝指标，画进脸区域缓冲后整块推屏
+// 数值页底部：RSRP 趋势折线（手搓，RMIN..RMAX 映射到图高；-90 grin 阈值画虚线参考）
+static void draw_sig_chart(uint16_t *buf)
+{
+    const int cx = 16, cw = 346, cy = 158, ch = 54;   // 图区（局部坐标）
+    const int RMIN = -120, RMAX = -60;                // RSRP 映射范围(dBm)
+    const uint16_t AX  = sw16(0x4208);                // 暗灰轴
+    const uint16_t REF = sw16(0x3A49);                // 暗参考线
+    const uint16_t LN  = 0xFFFF;                       // 白折线
+
+    for (int x = 0; x < cw; x++) {                     // 顶/底轴
+        buf[(size_t)cy * RW + cx + x] = AX;
+        buf[(size_t)(cy + ch) * RW + cx + x] = AX;
+    }
+    int yref = cy + ch - (-90 - RMIN) * ch / (RMAX - RMIN);   // -90 阈值虚线
+    if (yref > cy && yref < cy + ch)
+        for (int x = 0; x < cw; x += 5) buf[(size_t)yref * RW + cx + x] = REF;
+
+    int cnt = g_sig_cnt;
+    if (cnt < 2) return;
+    int prev_y = -1;
+    for (int px = 0; px < cw; px++) {
+        float f = (float)px * (cnt - 1) / (cw - 1);
+        int i0 = (int)f; float fr = f - i0;
+        int k0 = (g_sig_head - cnt + i0 + 2 * SIG_HIST_N) % SIG_HIST_N;
+        int k1 = (k0 + 1) % SIG_HIST_N;
+        float v = g_sig_hist[k0] * (1 - fr) + g_sig_hist[k1] * fr;
+        if (v < RMIN) v = RMIN; else if (v > RMAX) v = RMAX;
+        int y = cy + ch - (int)((v - RMIN) * ch / (RMAX - RMIN));
+        if (y < cy) y = cy; else if (y > cy + ch) y = cy + ch;
+        int y0 = (prev_y < 0) ? y : prev_y, y1 = y;    // 补纵向间隙，陡变不断线
+        if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
+        for (int yy = y0; yy <= y1; yy++) buf[(size_t)yy * RW + cx + px] = LN;
+        prev_y = y;
+    }
+}
+
+// 数值页：标题(含版本号) + 蜂窝指标 + RSRP 趋势图，画进脸区域缓冲后整块推屏
 static void draw_stats_page(void)
 {
     uint16_t *buf = g_face;
@@ -380,10 +416,10 @@ static void draw_stats_page(void)
     const uint16_t W = 0xFFFF;                 // 白（字节序对称）
     const uint16_t C = sw16(0x07FF);           // 青（标题）
     char s[48];
-    int x = 16, y = 6, lh = FONT_H + 9;
+    int x = 16, y = 4, lh = FONT_H + 5;
 
     snprintf(s, sizeof s, "模拟太 v%d", FW_VERSION);
-    draw_text(buf, RW, RH, x, y, s, C); y += lh + 3;
+    draw_text(buf, RW, RH, x, y, s, C); y += lh + 2;
     snprintf(s, sizeof s, "RSRP %d  SINR %d", g_stat.rsrp, g_stat.sinr);
     draw_text(buf, RW, RH, x, y, s, W); y += lh;
     snprintf(s, sizeof s, "载波 %dCC  B%s", g_stat.band_count, g_stat.band[0] ? g_stat.band : "?");
@@ -392,6 +428,8 @@ static void draw_stats_page(void)
     draw_text(buf, RW, RH, x, y, s, W); y += lh;
     snprintf(s, sizeof s, "%s %d℃ 电%d%%", g_stat.mode[0] ? g_stat.mode : "?", g_stat.temp, g_batt);
     draw_text(buf, RW, RH, x, y, s, W);
+
+    draw_sig_chart(buf);          // 底部 RSRP 趋势
 
     blit_psram(buf, RX0, RY0, RW, RH);
 }
