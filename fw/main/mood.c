@@ -99,10 +99,10 @@ void mood_update(cJSON *j)
     // E4 久闲→sleepy：信号好(grin/happy) + 吞吐持续很低 ~5min
     static int idle_polls = 0;
     if (g_touched || (xTaskGetTickCount() - s_motion_t) < pdMS_TO_TICKS(8000)) idle_polls = 0;
-    else if ((target == M_HAPPY || target == M_GRIN) && thr < 20000) {
+    else if ((target == M_HAPPY || target == M_GRIN) && thr < 150000) {   // 没流量门槛 150k/s（后台/轻量也算闲）
         if (idle_polls < 9999) idle_polls++;
     } else idle_polls = 0;
-    if (idle_polls >= 75) target = M_SLEEPY;   // 75×4s ≈ 5min
+    if (idle_polls >= 75) target = M_SLEEPY;   // 75×4s ≈ 5min 打盹
 
     // 防抖：新 mood 连续 2 次轮询稳定才切换（offline 立即生效）
     static int cand = M_HAPPY, cand_cnt = 0;
