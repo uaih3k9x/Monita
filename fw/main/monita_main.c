@@ -69,6 +69,9 @@ void app_main(void)
     TickType_t media_t0 = 0;
     uint8_t *media = NULL; int media_w = 0, media_h = 0, media_nf = 0, media_fi = 0;  // 媒体页(.m8g)播放
     TickType_t media_next = 0;
+    int  user_bright = BRIGHT_NORMAL;          // 设置页亮度滑块控制的常态亮度
+    bool st_dirty = false, btn_hot = false;    // 设置页待重画 / 按钮高亮
+    char st_ssid[40] = "", st_ip[20] = ""; int st_rssi = 0, st_tick = 0;
 
     // 省电：按需渲染（画面没真变化就不重画）+ 亮度
     const mood_t *last_m = NULL;
@@ -85,8 +88,13 @@ void app_main(void)
         if (tnow && !was_touch) { down_t = xTaskGetTickCount(); down_x = g_tx; down_y = g_ty; moved = false; }
         if (tnow && (abs(g_tx - down_x) > 40 || abs(g_ty - down_y) > 40)) moved = true;
         if (!tnow && was_touch) {                          // 松手
-            if (!moved && (xTaskGetTickCount() - down_t) < pdMS_TO_TICKS(300)) {
-                page = (page + 1) % 3;                      // 快速轻点 → 翻页（脸→数值→吧唧→脸）
+            bool tap = !moved && (xTaskGetTickCount() - down_t) < pdMS_TO_TICKS(300);
+            if (page == 3) {                                // 设置页：命中按钮/空白处理
+                int r = display_settings_hit(down_x, down_y, NULL);
+                if (r == 2) { if (media) { free(media); media = NULL; media_nf = 0; } st_dirty = true; }  // 刷新吧唧
+                else if (tap && r == 0) { page = 0; page_dirty = true; }                                  // 空白轻点回脸
+            } else if (tap) {
+                page = (page + 1) % 4;                      // 脸→数值→吧唧→设置→脸
                 page_dirty = true;
                 pet = 0.0f;                                 // 翻页不算摸头
             }
@@ -155,7 +163,34 @@ void app_main(void)
             vTaskDelay(pdMS_TO_TICKS(15));
             continue;
         }
-        // 离开媒体页：不释放，缓存留 PSRAM，下次进页秒开
+        // ── 设置页：亮度滑块 + 刷新吧唧 + WiFi 信息（手搓）──
+        if (page == 3) {
+            if (page_dirty) {
+                page_dirty = false;
+                display_bubble(""); display_battery(-1, false);
+                shown_bub[0] = 1; shown_bub[1] = 0; shown_bstate = -99;
+                display_clear(); st_dirty = true; st_tick = 0;
+            }
+            // 滑块拖动 live 调亮度 + 按钮高亮
+            if (tnow) {
+                int b, r = display_settings_hit(g_tx, g_ty, &b);
+                if (r == 1 && b != user_bright) { user_bright = b; display_brightness(b); st_dirty = true; }
+                bool hot = (r == 2);
+                if (hot != btn_hot) { btn_hot = hot; st_dirty = true; }
+            } else if (btn_hot) { btn_hot = false; st_dirty = true; }
+            if ((st_tick++ % 40) == 0) {                 // 定期刷 WiFi 信息
+                char ns[40], nip[20]; int nr; net_info(ns, sizeof ns, nip, sizeof nip, &nr);
+                if (strcmp(ns, st_ssid) || strcmp(nip, st_ip) || nr != st_rssi) {
+                    strcpy(st_ssid, ns); strcpy(st_ip, nip); st_rssi = nr; st_dirty = true;
+                }
+            }
+            if (st_dirty) { st_dirty = false; display_settings(user_bright, st_ssid, st_ip, st_rssi, btn_hot); }
+            t++;
+            vTaskDelay(pdMS_TO_TICKS(15));
+            continue;
+        }
+
+        // 离开媒体页/设置页：不释放，缓存留 PSRAM，下次进页秒开
         if (page_dirty) { display_clear(); page_dirty = false; last_m = NULL; }  // 回脸：整屏清残留并强制重画一帧
 
         // 事件覆盖：poll 触发的临时表情（载波/制式/上线），TTL 内盖住稳态
@@ -251,7 +286,7 @@ void app_main(void)
         }
 
         // 亮度：sleepy 且非摸头 → 暗；否则常态
-        int wantb = (!petting && m == &MOODS[M_SLEEPY]) ? BRIGHT_SLEEPY : BRIGHT_NORMAL;
+        int wantb = (!petting && m == &MOODS[M_SLEEPY]) ? BRIGHT_SLEEPY : user_bright;
         if (wantb != cur_bright) { display_brightness(wantb); cur_bright = wantb; }
 
         // 省电·按需渲染：画面实际没变（呼吸没跨像素/没眨眼/没瞟动/配件没落/没换表情）就不重画

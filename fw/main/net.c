@@ -71,6 +71,23 @@ void poll_task(void *arg)
     }
 }
 
+// 取当前 WiFi 信息（设置页）：SSID / IP / RSSI
+void net_info(char *ssid, int ssz, char *ip, int isz, int *rssi)
+{
+    if (ssid && ssz) ssid[0] = 0;
+    if (ip && isz) ip[0] = 0;
+    if (rssi) *rssi = 0;
+    wifi_ap_record_t ap;
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+        if (ssid) { strncpy(ssid, (char *)ap.ssid, ssz - 1); ssid[ssz - 1] = 0; }
+        if (rssi) *rssi = ap.rssi;
+    }
+    esp_netif_t *nif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_netif_ip_info_t ipi;
+    if (nif && ip && esp_netif_get_ip_info(nif, &ipi) == ESP_OK)
+        snprintf(ip, isz, IPSTR, IP2STR(&ipi.ip));
+}
+
 // 下载整个文件到 PSRAM 缓冲（媒体页吧唧用）。返回字节数；*out 由调用方 free；失败返回 -1。
 int net_fetch(const char *url, uint8_t **out)
 {

@@ -607,6 +607,78 @@ void display_hearts(int n, float phase)
     blit_psram(g_bub, 0, BUB_Y0, LCD_W, BUB_H);
 }
 
+// 设置页：标题 + 亮度滑块 + 刷新按钮 + WiFi 信息（手搓，画进脸区域缓冲）
+// 控件局部坐标（与 main 的命中检测一致）：滑块 track x20..358 y64..78；按钮 x90..288 y96..134
+void display_settings(int bright, const char *ssid, const char *ip, int rssi, int btn_hot)
+{
+    uint16_t *buf = g_face;
+    memset(buf, 0x00, (size_t)RW * RH * 2);
+    const uint16_t W = 0xFFFF, C = sw16(0x07FF);
+    char s[48];
+
+    draw_text(buf, RW, RH, (RW - text_width("设置")) / 2, 2, "设置", C);
+    snprintf(s, sizeof s, "亮度  %d%%", bright);
+    draw_text(buf, RW, RH, 20, 34, s, W);
+
+    // 滑块：底轨 + 填充 + 圆钮
+    const int tx0 = 20, tw = RW - 40, ty = 64, th = 14;
+    const uint16_t trackc = sw16(0x4208), fillc = sw16(0x07FF);
+    for (int y = ty; y < ty + th; y++)
+        for (int x = tx0; x < tx0 + tw; x++) buf[(size_t)y * RW + x] = trackc;
+    int fw = tw * bright / 100;
+    for (int y = ty; y < ty + th; y++)
+        for (int x = tx0; x < tx0 + fw; x++) buf[(size_t)y * RW + x] = fillc;
+    int kx = tx0 + fw, ky = ty + th / 2, kr = 11;
+    for (int y = ky - kr; y <= ky + kr; y++)
+        for (int x = kx - kr; x <= kx + kr; x++) {
+            int dx = x - kx, dy = y - ky;
+            if (dx * dx + dy * dy <= kr * kr && x >= 0 && x < RW && y >= 0 && y < RH) buf[(size_t)y * RW + x] = W;
+        }
+
+    // 按钮
+    const int bx = 90, by = 96, bw = RW - 180, bh = 38;
+    const uint16_t bc = btn_hot ? sw16(0x07E0) : sw16(0x39C7);
+    for (int y = by; y < by + bh; y++)
+        for (int x = bx; x < bx + bw; x++) buf[(size_t)y * RW + x] = bc;
+    draw_text(buf, RW, RH, bx + (bw - text_width("刷新吧唧")) / 2, by + (bh - FONT_H) / 2, "刷新吧唧", btn_hot ? sw16(0) : W);
+
+    // WiFi 信息
+    snprintf(s, sizeof s, "WiFi %s", ssid[0] ? ssid : "-"); draw_text(buf, RW, RH, 20, 146, s, W);
+    snprintf(s, sizeof s, "IP   %s", ip[0] ? ip : "-");     draw_text(buf, RW, RH, 20, 172, s, W);
+    snprintf(s, sizeof s, "信号 %d dBm", rssi);             draw_text(buf, RW, RH, 20, 198, s, W);
+
+    blit_psram(buf, RX0, RY0, RW, RH);
+}
+
+// 【调试】触摸校准：在固件以为的触点处画红十字 + 显示原始坐标（整屏）
+void display_touchdot(int sx, int sy)
+{
+    uint16_t *buf = g_face;
+    memset(buf, 0x00, (size_t)RW * RH * 2);
+    char s[40]; snprintf(s, sizeof s, "T %d,%d", sx, sy);
+    draw_text(buf, RW, RH, 8, 4, s, sw16(0x07FF));
+    int lx = sx - RX0, ly = sy - RY0;          // 转脸缓冲局部坐标
+    const uint16_t R = sw16(0xF800);
+    for (int d = -12; d <= 12; d++) {
+        if (lx + d >= 0 && lx + d < RW && ly >= 0 && ly < RH) buf[(size_t)ly * RW + (lx + d)] = R;
+        if (ly + d >= 0 && ly + d < RH && lx >= 0 && lx < RW) buf[(size_t)(ly + d) * RW + lx] = R;
+    }
+    blit_psram(buf, RX0, RY0, RW, RH);
+}
+
+// 设置页命中检测（屏幕坐标）：0=空白 1=滑块(*bright=该处亮度) 2=按钮
+int display_settings_hit(int sx, int sy, int *bright)
+{
+    int lx = sx - RX0, ly = sy - RY0;
+    if (ly >= 54 && ly <= 90 && lx >= 8 && lx <= 358) {
+        int b = (lx - 20) * 100 / 338; if (b < 0) b = 0; else if (b > 100) b = 100;
+        if (bright) *bright = b;
+        return 1;
+    }
+    if (lx >= 90 && lx <= 288 && ly >= 96 && ly <= 134) return 2;
+    return 0;
+}
+
 // 屏中央一行白字（画进脸区域缓冲，居中）
 void display_message(const char *s)
 {

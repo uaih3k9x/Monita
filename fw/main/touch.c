@@ -67,8 +67,12 @@ static bool tp_read(int *x, int *y)
     if (d[6] != 0xAB) return false;
     if ((d[5] & 0x7F) < 1) return false;
     if ((d[0] & 0x0F) != 0x06) return false;
-    *x = (d[1] << 4) | (d[3] >> 4);
-    *y = (d[2] << 4) | (d[3] & 0x0F);
+    int rx = (d[1] << 4) | (d[3] >> 4);
+    int ry = (d[2] << 4) | (d[3] & 0x0F);
+    rx = 466 - rx; ry = 466 - ry;              // CST9217 与 CO5300 差 180°，翻正
+    if (rx < 0) rx = 0; else if (rx > 465) rx = 465;
+    if (ry < 0) ry = 0; else if (ry > 465) ry = 465;
+    *x = rx; *y = ry;
     return true;
 }
 
