@@ -550,6 +550,63 @@ void display_blit_fit(const uint8_t *px, int w, int h)
     }
 }
 
+// 13×11 像素心点阵（星露谷风：粗描边 + 红填充 + 高光）。1=填充
+#define HW 13
+#define HH 11
+static const uint8_t HEART[HH][HW] = {
+    {0,0,1,1,1,0,0,0,1,1,1,0,0},
+    {0,1,1,1,1,1,0,1,1,1,1,1,0},
+    {1,1,1,1,1,1,1,1,1,1,1,1,1},
+    {1,1,1,1,1,1,1,1,1,1,1,1,1},
+    {1,1,1,1,1,1,1,1,1,1,1,1,1},
+    {0,1,1,1,1,1,1,1,1,1,1,1,0},
+    {0,0,1,1,1,1,1,1,1,1,1,0,0},
+    {0,0,0,1,1,1,1,1,1,1,0,0,0},
+    {0,0,0,0,1,1,1,1,1,0,0,0,0},
+    {0,0,0,0,0,1,1,1,0,0,0,0,0},
+    {0,0,0,0,0,0,1,0,0,0,0,0,0},
+};
+
+// 画一颗像素心：每格放大 cs×cs；空格但邻填充=描边，左上两格=高光
+static void draw_pixheart(uint16_t *buf, int stride, int hgt, int ox, int oy, int cs)
+{
+    const uint16_t fill  = sw16((28 << 11) | (10 << 5) | 8);   // 亮红
+    const uint16_t outl  = sw16((12 << 11) | (4 << 5) | 5);    // 深红描边
+    const uint16_t shine = sw16((31 << 11) | (47 << 5) | 25);  // 浅粉高光
+    for (int gy = 0; gy < HH; gy++) {
+        for (int gx = 0; gx < HW; gx++) {
+            uint16_t col;
+            if (HEART[gy][gx]) {
+                col = ((gy == 1 && (gx == 3 || gx == 4)) || (gy == 2 && gx == 3)) ? shine : fill;
+            } else {
+                int nb = (gy > 0 && HEART[gy - 1][gx]) || (gy < HH - 1 && HEART[gy + 1][gx]) ||
+                         (gx > 0 && HEART[gy][gx - 1]) || (gx < HW - 1 && HEART[gy][gx + 1]);
+                if (!nb) continue;
+                col = outl;
+            }
+            for (int py = 0; py < cs; py++)
+                for (int px = 0; px < cs; px++) {
+                    int X = ox + gx * cs + px, Y = oy + gy * cs + py;
+                    if (X >= 0 && X < stride && Y >= 0 && Y < hgt) buf[(size_t)Y * stride + X] = col;
+                }
+        }
+    }
+}
+
+// 摸头时气泡带冒 n 颗像素心，轻轻上下飘（星露谷摸小动物那种）
+void display_hearts(int n, float phase)
+{
+    memset(g_bub, 0x00, (size_t)LCD_W * BUB_H * 2);
+    if (n < 1) n = 1; else if (n > 3) n = 3;
+    const int cs = 4, hw = HW * cs, hh = HH * cs, sp = hw + 24;
+    const int x0 = LCD_W / 2 - ((n - 1) * sp + hw) / 2;
+    for (int i = 0; i < n; i++) {
+        int bob = (int)(3.0f * sinf(phase + i * 1.6f));      // 上下飘
+        draw_pixheart(g_bub, LCD_W, BUB_H, x0 + i * sp, (BUB_H - hh) / 2 - bob, cs);
+    }
+    blit_psram(g_bub, 0, BUB_Y0, LCD_W, BUB_H);
+}
+
 // 屏中央一行白字（画进脸区域缓冲，居中）
 void display_message(const char *s)
 {

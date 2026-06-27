@@ -168,17 +168,19 @@ void app_main(void)
                         : evt     ? &MOODS[g_evt_mood]
                                   : &MOODS[g_mood];
 
-        // 想显示的气泡：摸头合成台词 / 连不上 / 事件 / 网络层动态气泡
-        const char *want = petting ? m->bubble
-                         : offline ? "连不上…"
-                         : evt     ? g_evt_bub
-                                   : g_dyn_bub;
-
-        if (strncmp(want, shown_bub, sizeof shown_bub) != 0) {   // 台词变了 → 刷气泡
-            strncpy(shown_bub, want, sizeof shown_bub - 1);
-            shown_bub[sizeof shown_bub - 1] = 0;
-            display_bubble(want);
-            ESP_LOGI(TAG, "%s%s net=%d", petting ? "摸→" : "mood=", m->name, (int)g_net);
+        if (petting) {
+            // 摸头：气泡带冒脉动爱心（越满足越多颗），松手后强制重画文字气泡
+            display_hearts(pet > 0.95f ? 3 : (pet > 0.55f ? 2 : 1), (float)t * 0.18f);
+            shown_bub[0] = 1; shown_bub[1] = 0;
+        } else {
+            // 想显示的气泡：连不上 / 事件 / 网络层动态气泡
+            const char *want = offline ? "连不上…" : evt ? g_evt_bub : g_dyn_bub;
+            if (strncmp(want, shown_bub, sizeof shown_bub) != 0) {   // 台词变了 → 刷气泡
+                strncpy(shown_bub, want, sizeof shown_bub - 1);
+                shown_bub[sizeof shown_bub - 1] = 0;
+                display_bubble(want);
+                ESP_LOGI(TAG, "mood=%s net=%d", m->name, (int)g_net);
+            }
         }
 
         // 电量：摸头时亮出，松手清掉
