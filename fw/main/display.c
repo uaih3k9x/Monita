@@ -520,6 +520,12 @@ bool display_image(const uint8_t *raw, size_t len)
     return true;
 }
 
+// 把 w×h 的 RGB565 块推到屏 (x,y)（媒体页逐帧用）
+void display_blit(const uint8_t *px, int x, int y, int w, int h)
+{
+    blit_psram((const uint16_t *)px, x, y, w, h);
+}
+
 // 屏中央一行白字（画进脸区域缓冲，居中）
 void display_message(const char *s)
 {

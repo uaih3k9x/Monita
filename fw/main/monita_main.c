@@ -22,7 +22,7 @@
 
 static const char *TAG = "monita";
 
-#define BADGE_URL "http://192.168.2.254/badge.565"   // 电子吧唧（mkbadge.py 烤好的 466² RGB565）
+#define BADGE_URL "http://192.168.2.254/badge.m8g"   // 电子吧唧（mkbadge.py 烤好的 .m8g：静态/GIF）
 #define MEDIA_TIMEOUT_MS 45000                        // 媒体页停留上限（烧屏保护，自动回脸）
 #define BRIGHT_NORMAL 70                              // 常态亮度（省电，原来 100）
 #define BRIGHT_SLEEPY 28                              // sleepy 时再暗
@@ -67,6 +67,8 @@ void app_main(void)
     TickType_t down_t = 0; int down_x = 0, down_y = 0;
     int   stats_tick = 0;
     TickType_t media_t0 = 0;
+    uint8_t *media = NULL; int media_w = 0, media_h = 0, media_nf = 0, media_fi = 0;  // 媒体页(.m8g)播放
+    TickType_t media_next = 0;
 
     // 省电：按需渲染（画面没真变化就不重画）+ 亮度
     const mood_t *last_m = NULL;
@@ -112,7 +114,7 @@ void app_main(void)
             continue;
         }
 
-        // ── 媒体页（电子吧唧）：进页时拉一张图显示，停留超时自动回脸（烧屏保护）──
+        // ── 媒体页（电子吧唧）：进页拉 .m8g 逐帧循环播；停留超时自动回脸（烧屏保护）──
         if (page == 2) {
             if (page_dirty) {
                 page_dirty = false;
@@ -121,22 +123,38 @@ void app_main(void)
                 media_t0 = xTaskGetTickCount();
                 display_clear();
                 display_message("载入吧唧…");
-                uint8_t *img = NULL;
-                int n = net_fetch(BADGE_URL, &img);
-                if (n > 0 && img) {
-                    if (!display_image(img, n)) display_message("吧唧尺寸不符");
-                    free(img);
-                } else {
-                    display_message("没找到 badge.565");
+                if (media) { free(media); media = NULL; }
+                media_nf = 0; media_fi = 0;
+                uint8_t *buf = NULL;
+                int n = net_fetch(BADGE_URL, &buf);
+                if (n > 16 && buf[0] == 'M' && buf[1] == '8' && buf[2] == 'G' && buf[3] == '1') {
+                    int w = buf[4] | (buf[5] << 8), h = buf[6] | (buf[7] << 8), nf = buf[8] | (buf[9] << 8);
+                    long need = 12 + (long)nf * (2 + (long)w * h * 2);
+                    if (w > 0 && h > 0 && w <= LCD_W && h <= LCD_H && nf > 0 && need <= n) {
+                        media = buf; media_w = w; media_h = h; media_nf = nf;
+                        media_fi = 0; media_next = xTaskGetTickCount();
+                        display_clear();
+                    } else { free(buf); display_message("吧唧格式不符"); }
+                } else { if (buf) free(buf); display_message("没找到 badge.m8g"); }
+            }
+            if (media_nf > 0) {                            // 逐帧播放（到点才换帧）
+                TickType_t now = xTaskGetTickCount();
+                if ((int32_t)(now - media_next) >= 0) {
+                    const uint8_t *fp = media + 12 + (size_t)media_fi * (2 + (size_t)media_w * media_h * 2);
+                    int delay = fp[0] | (fp[1] << 8);
+                    display_blit(fp + 2, (LCD_W - media_w) / 2, (LCD_H - media_h) / 2, media_w, media_h);
+                    media_next = now + pdMS_TO_TICKS(delay < 20 ? 20 : delay);
+                    media_fi = (media_fi + 1) % media_nf;
                 }
             }
             if ((int32_t)(xTaskGetTickCount() - media_t0) > (int32_t)pdMS_TO_TICKS(MEDIA_TIMEOUT_MS)) {
                 page = 0; page_dirty = true;               // 超时回脸
             }
             t++;
-            vTaskDelay(pdMS_TO_TICKS(50));
+            vTaskDelay(pdMS_TO_TICKS(15));
             continue;
         }
+        if (media) { free(media); media = NULL; media_nf = 0; }   // 离开媒体页释放缓冲
         if (page_dirty) { display_clear(); page_dirty = false; last_m = NULL; }  // 回脸：整屏清残留并强制重画一帧
 
         // 事件覆盖：poll 触发的临时表情（载波/制式/上线），TTL 内盖住稳态

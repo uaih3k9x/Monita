@@ -1,26 +1,45 @@
 #!/usr/bin/env python3
-# 把任意图片(PNG/JPG/…)烤成 466×466 RGB565 原始数据，供模拟太「电子吧唧」媒体页直接 blit。
-# 用法: python3 tools/mkbadge.py 月詠.png badge.565
-#   再 scp badge.565 到路由器 /www/，板子翻到媒体页就拉取显示。
-# 设备零解码：文件按「大端 RGB565」存，ESP32(小端)读进来即面板要的 sw16(c) 字节序。
+# 把 PNG/JPG/GIF 烤成模拟太「电子吧唧」媒体页格式 .m8g —— 静态=1帧、GIF=多帧；设备零解码直接播。
+# 用法: python3 tools/mkbadge.py 你的图.gif badge.m8g   再 scp 到路由器 /www/badge.m8g
+# 格式: "M8G1" + u16LE(w,h,nframes,0) + 每帧[ u16LE delay_ms + w*h × u16BE RGB565 ]
+#   像素大端：ESP32(小端)读进来即面板要的 sw16(c) 字节序，直接 blit。
 import sys, struct
 from PIL import Image
 
-W = H = 466
-src = sys.argv[1] if len(sys.argv) > 1 else "badge.png"
-out = sys.argv[2] if len(sys.argv) > 2 else "badge.565"
+src = sys.argv[1] if len(sys.argv) > 1 else "badge.gif"
+out = sys.argv[2] if len(sys.argv) > 2 else "badge.m8g"
 
-im = Image.open(src).convert("RGB")
-im.thumbnail((W, H), Image.LANCZOS)                 # 等比缩进 466 内
-canvas = Image.new("RGB", (W, H), (0, 0, 0))        # 黑底（圆屏角外/留边都黑）
-canvas.paste(im, ((W - im.width) // 2, (H - im.height) // 2))
+im = Image.open(src)
+frames, durs = [], []           # 逐帧抽取（seek 让 PIL 自动合成 GIF 的部分帧/disposal）
+i = 0
+while True:
+    try: im.seek(i)
+    except EOFError: break
+    frames.append(im.convert("RGB"))
+    durs.append(im.info.get("duration", 100))
+    i += 1
+nf = len(frames)
 
-buf = bytearray()
-for (r, g, b) in canvas.getdata():
-    c = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)   # RGB565
-    buf += struct.pack(">H", c)                            # 大端：设备小端读即 sw16(c)
+W = H = 466 if nf == 1 else 300   # 静态铺满，动图缩到 300 居中（省空间/帧率）
 
-with open(out, "wb") as f:
-    f.write(buf)
-print(f"{src} → {out}  {len(buf)} 字节  ({W}x{H} RGB565)")
-print(f"部署: cat {out} | ssh root@192.168.2.254 'cat >/www/badge.565'")
+def to565(fr):
+    f = fr.copy(); f.thumbnail((W, H), Image.LANCZOS)
+    canvas = Image.new("RGB", (W, H), (0, 0, 0))
+    canvas.paste(f, ((W - f.width) // 2, (H - f.height) // 2))
+    buf = bytearray()
+    for (r, g, b) in canvas.getdata():
+        buf += struct.pack(">H", ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3))
+    return buf
+
+data = bytearray(b"M8G1")
+data += struct.pack("<HHHH", W, H, nf, 0)
+for fr, d in zip(frames, durs):
+    delay = 60000 if nf == 1 else max(20, min(int(d), 65535))   # 静态给超长延时（只画一次）
+    data += struct.pack("<H", delay) + to565(fr)
+
+open(out, "wb").write(data)
+kb = len(data) // 1024
+print(f"{src} → {out}  {nf} 帧 {W}x{H}  {kb} KB")
+if kb > 3000:
+    print("⚠ 偏大，建议用更短/更小的 GIF（PSRAM 与传输考虑）")
+print(f"部署: cat {out} | ssh root@192.168.2.254 'cat >/www/badge.m8g'")
