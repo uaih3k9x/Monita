@@ -23,6 +23,8 @@ static const char *TAG = "monita";
 
 #define BADGE_URL "http://192.168.2.254/badge.565"   // 电子吧唧（mkbadge.py 烤好的 466² RGB565）
 #define MEDIA_TIMEOUT_MS 45000                        // 媒体页停留上限（烧屏保护，自动回脸）
+#define BRIGHT_NORMAL 70                              // 常态亮度（省电，原来 100）
+#define BRIGHT_SLEEPY 28                              // sleepy 时再暗
 
 static inline float frand(void) { return (float)esp_random() / (float)UINT32_MAX; }
 
@@ -30,6 +32,7 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "模拟太 booting");
     if (!display_init()) { ESP_LOGE(TAG, "显示初始化失败"); return; }
+    display_brightness(BRIGHT_NORMAL);
     display_bubble(MOODS[M_HAPPY].bubble);
 
     i2c_bus_init();             // 共享 I2C 总线（电量 + 触摸）
@@ -60,6 +63,11 @@ void app_main(void)
     TickType_t down_t = 0; int down_x = 0, down_y = 0;
     int   stats_tick = 0;
     TickType_t media_t0 = 0;
+
+    // 省电：按需渲染（画面没真变化就不重画）+ 亮度
+    const mood_t *last_m = NULL;
+    int last_by = 0, last_gx = 0, last_ok = 0, last_sw = -2, last_tr = -2;
+    int cur_bright = BRIGHT_NORMAL;
 
     // 被摸态合成表情（∩ 弯眼 + 强腮红）
     static const mood_t PET_LO = {"pet", EYE_HAPPY, 46, 32, 26, 1.0f, false, false, true, false, false, "好舒服~"};
@@ -125,7 +133,7 @@ void app_main(void)
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
         }
-        if (page_dirty) { display_clear(); page_dirty = false; }  // 回脸：整屏清掉媒体页全屏残留，脸/气泡随后重画
+        if (page_dirty) { display_clear(); page_dirty = false; last_m = NULL; }  // 回脸：整屏清残留并强制重画一帧
 
         // 事件覆盖：poll 触发的临时表情（载波/制式/上线），TTL 内盖住稳态
         const bool evt = (g_evt_until != 0) &&
@@ -187,8 +195,21 @@ void app_main(void)
             if (m->shake) gx_eff += sinf((float)t * 0.9f) * 3.0f;
         }
 
-        display_face(m, t, by, gx_eff, openK);
+        // 亮度：sleepy 且非摸头 → 暗；否则常态
+        int wantb = (!petting && m == &MOODS[M_SLEEPY]) ? BRIGHT_SLEEPY : BRIGHT_NORMAL;
+        if (wantb != cur_bright) { display_brightness(wantb); cur_bright = wantb; }
+
+        // 省电·按需渲染：画面实际没变（呼吸没跨像素/没眨眼/没瞟动/配件没落/没换表情）就不重画
+        int by_q = (int)lroundf(by), gx_q = (int)lroundf(gx_eff), ok_q = (int)lroundf(openK * 20);
+        int sw_q = m->sweat ? (int)((t * 2) % 92) : -1;
+        int tr_q = m->tear  ? (int)((t * 2) % 56) : -1;
+        bool need = (m != last_m) || (by_q != last_by) || (gx_q != last_gx) ||
+                    (ok_q != last_ok) || (sw_q != last_sw) || (tr_q != last_tr);
+        if (need) {
+            display_face(m, t, by, gx_eff, openK);
+            last_m = m; last_by = by_q; last_gx = gx_q; last_ok = ok_q; last_sw = sw_q; last_tr = tr_q;
+        }
         t++;
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(need ? 12 : 70));   // 画了短歇；没画就多睡省电（计数节奏 ~12Hz 不变）
     }
 }

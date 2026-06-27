@@ -40,6 +40,7 @@ void wifi_start(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wc));
     ESP_ERROR_CHECK(esp_wifi_start());
+    esp_wifi_set_ps(WIFI_PS_MAX_MODEM);   // 省电：射频在 beacon 间隙多睡（轮询场景可接受延迟）
     ESP_LOGI(TAG, "连 %s → 轮询 %s 驱动表情", WIFI_SSID, FACE_URL);
 }
 

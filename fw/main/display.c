@@ -472,6 +472,7 @@ void display_face(const mood_t *m, int t, float by, float gx, float openK)
 void display_bubble(const char *s)         { draw_bubble(s); }
 void display_battery(int pct, bool charging) { draw_battery(pct, charging); }
 void display_stats(void)                   { draw_stats_page(); }
+void display_brightness(int pct)           { esp_lcd_panel_co5300_set_brightness(s_panel, pct); }
 
 // 媒体页：raw 必须是 LCD_W×LCD_H 的 RGB565（已按面板字节序大端烤好）→ 直接整屏推
 bool display_image(const uint8_t *raw, size_t len)
