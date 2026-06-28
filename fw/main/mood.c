@@ -21,6 +21,7 @@ const mood_t MOODS[] = {
 
 stat_t              g_stat = {0};
 int16_t             g_sig_hist[SIG_HIST_N] = {0};
+int16_t             g_sinr_hist[SIG_HIST_N] = {0};
 int                 g_sig_head = 0, g_sig_cnt = 0;
 volatile int        g_mood = M_HAPPY;
 char                g_dyn_bub[64] = "";
@@ -55,8 +56,9 @@ static int map_mood(cJSON *j)
     if (rr <= -30 && rr >= -150) { s_rsrp = rr; s_sinr = ss; }
     long rsrp = s_rsrp, sinr = s_sinr;
 
-    // 推进 RSRP 历史（趋势图用）
-    g_sig_hist[g_sig_head] = (int16_t)rsrp;
+    // 推进 RSRP/SINR 历史（趋势图用）
+    g_sig_hist[g_sig_head]  = (int16_t)rsrp;
+    g_sinr_hist[g_sig_head] = (int16_t)sinr;
     g_sig_head = (g_sig_head + 1) % SIG_HIST_N;
     if (g_sig_cnt < SIG_HIST_N) g_sig_cnt++;
 

@@ -36,7 +36,8 @@ extern stat_t g_stat;
 
 // RSRP 历史（数值页趋势图用）：环形缓冲，每次有效 poll 推一个
 #define SIG_HIST_N 120
-extern int16_t g_sig_hist[SIG_HIST_N];
+extern int16_t g_sig_hist[SIG_HIST_N];   // RSRP
+extern int16_t g_sinr_hist[SIG_HIST_N];  // SINR（与 RSRP 同步推，共用 head/cnt）
 extern int     g_sig_head, g_sig_cnt;
 
 // 共享状态（渲染循环读，mood_update 写）

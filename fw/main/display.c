@@ -373,39 +373,45 @@ static void draw_battery(int pct, bool charging)
 }
 
 // 数值页底部：RSRP 趋势折线（手搓，RMIN..RMAX 映射到图高；-90 grin 阈值画虚线参考）
-static void draw_sig_chart(uint16_t *buf)
+#define CHX 16
+#define CHW 346
+#define CHY 158
+#define CHH 54
+// 画一条折线（hist 环形缓冲映射 [rmin,rmax] → 图高），补纵向间隙不断线
+static void chart_series(uint16_t *buf, const int16_t *hist, int rmin, int rmax, uint16_t col)
 {
-    const int cx = 16, cw = 346, cy = 158, ch = 54;   // 图区（局部坐标）
-    const int RMIN = -120, RMAX = -60;                // RSRP 映射范围(dBm)
-    const uint16_t AX  = sw16(0x4208);                // 暗灰轴
-    const uint16_t REF = sw16(0x3A49);                // 暗参考线
-    const uint16_t LN  = 0xFFFF;                       // 白折线
-
-    for (int x = 0; x < cw; x++) {                     // 顶/底轴
-        buf[(size_t)cy * RW + cx + x] = AX;
-        buf[(size_t)(cy + ch) * RW + cx + x] = AX;
-    }
-    int yref = cy + ch - (-90 - RMIN) * ch / (RMAX - RMIN);   // -90 阈值虚线
-    if (yref > cy && yref < cy + ch)
-        for (int x = 0; x < cw; x += 5) buf[(size_t)yref * RW + cx + x] = REF;
-
     int cnt = g_sig_cnt;
     if (cnt < 2) return;
     int prev_y = -1;
-    for (int px = 0; px < cw; px++) {
-        float f = (float)px * (cnt - 1) / (cw - 1);
+    for (int px = 0; px < CHW; px++) {
+        float f = (float)px * (cnt - 1) / (CHW - 1);
         int i0 = (int)f; float fr = f - i0;
         int k0 = (g_sig_head - cnt + i0 + 2 * SIG_HIST_N) % SIG_HIST_N;
         int k1 = (k0 + 1) % SIG_HIST_N;
-        float v = g_sig_hist[k0] * (1 - fr) + g_sig_hist[k1] * fr;
-        if (v < RMIN) v = RMIN; else if (v > RMAX) v = RMAX;
-        int y = cy + ch - (int)((v - RMIN) * ch / (RMAX - RMIN));
-        if (y < cy) y = cy; else if (y > cy + ch) y = cy + ch;
-        int y0 = (prev_y < 0) ? y : prev_y, y1 = y;    // 补纵向间隙，陡变不断线
+        float v = hist[k0] * (1 - fr) + hist[k1] * fr;
+        if (v < rmin) v = rmin; else if (v > rmax) v = rmax;
+        int y = CHY + CHH - (int)((v - rmin) * CHH / (rmax - rmin));
+        if (y < CHY) y = CHY; else if (y > CHY + CHH) y = CHY + CHH;
+        int y0 = (prev_y < 0) ? y : prev_y, y1 = y;
         if (y0 > y1) { int t = y0; y0 = y1; y1 = t; }
-        for (int yy = y0; yy <= y1; yy++) buf[(size_t)yy * RW + cx + px] = LN;
+        for (int yy = y0; yy <= y1; yy++) buf[(size_t)yy * RW + CHX + px] = col;
         prev_y = y;
     }
+}
+
+// 趋势图：RSRP(白) + SINR(青) 两条线；顶/底暗轴 + RSRP -90 阈值虚线
+static void draw_sig_chart(uint16_t *buf)
+{
+    const uint16_t AX = sw16(0x4208), REF = sw16(0x3A49);
+    for (int x = 0; x < CHW; x++) {
+        buf[(size_t)CHY * RW + CHX + x] = AX;
+        buf[(size_t)(CHY + CHH) * RW + CHX + x] = AX;
+    }
+    int yref = CHY + CHH - (-90 - (-120)) * CHH / ((-60) - (-120));   // RSRP -90 虚线
+    if (yref > CHY && yref < CHY + CHH)
+        for (int x = 0; x < CHW; x += 5) buf[(size_t)yref * RW + CHX + x] = REF;
+    chart_series(buf, g_sinr_hist, -5, 30, sw16(0x07FF));   // SINR 青（下层）
+    chart_series(buf, g_sig_hist, -120, -60, 0xFFFF);       // RSRP 白（上层，主）
 }
 
 // 数值页：标题(含版本号) + 蜂窝指标 + RSRP 趋势图，画进脸区域缓冲后整块推屏
@@ -567,12 +573,15 @@ static const uint8_t HEART[HH][HW] = {
     {0,0,0,0,0,0,1,0,0,0,0,0,0},
 };
 
-// 画一颗像素心：每格放大 cs×cs；空格但邻填充=描边，左上两格=高光
-static void draw_pixheart(uint16_t *buf, int stride, int hgt, int ox, int oy, int cs)
+// 画一颗像素心：每格放大 cs×cs；空格但邻填充=描边，左上两格=高光；fade 0..1 整体变暗(淡出)
+static void draw_pixheart(uint16_t *buf, int stride, int hgt, int ox, int oy, int cs, float fade)
 {
-    const uint16_t fill  = sw16((28 << 11) | (10 << 5) | 8);   // 亮红
-    const uint16_t outl  = sw16((12 << 11) | (4 << 5) | 5);    // 深红描边
-    const uint16_t shine = sw16((31 << 11) | (47 << 5) | 25);  // 浅粉高光
+    if (fade < 0.12f) return;
+#define FC(r, g, b) sw16((((int)((r) * fade)) << 11) | (((int)((g) * fade)) << 5) | ((int)((b) * fade)))
+    const uint16_t fill  = FC(28, 10, 8);    // 亮红
+    const uint16_t outl  = FC(12, 4, 5);     // 深红描边
+    const uint16_t shine = FC(31, 47, 25);   // 浅粉高光
+#undef FC
     for (int gy = 0; gy < HH; gy++) {
         for (int gx = 0; gx < HW; gx++) {
             uint16_t col;
@@ -593,22 +602,27 @@ static void draw_pixheart(uint16_t *buf, int stride, int hgt, int ox, int oy, in
     }
 }
 
-// 摸头时气泡带冒 n 颗像素心，轻轻上下飘（星露谷摸小动物那种）
+// 摸头时气泡带冒 n 颗像素心，逐颗往上飘 + 淡出（星露谷摸小动物那种）
 void display_hearts(int n, float phase)
 {
     memset(g_bub, 0x00, (size_t)LCD_W * BUB_H * 2);
     if (n < 1) n = 1; else if (n > 3) n = 3;
-    const int cs = 4, hw = HW * cs, hh = HH * cs, sp = hw + 24;
+    const int cs = 3, hw = HW * cs, hh = HH * cs, sp = hw + 30;
     const int x0 = LCD_W / 2 - ((n - 1) * sp + hw) / 2;
+    const int travel = BUB_H - hh - 2;
     for (int i = 0; i < n; i++) {
-        int bob = (int)(3.0f * sinf(phase + i * 1.6f));      // 上下飘
-        draw_pixheart(g_bub, LCD_W, BUB_H, x0 + i * sp, (BUB_H - hh) / 2 - bob, cs);
+        float ph = phase * 0.5f + i * 0.9f;
+        float u = ph - floorf(ph);                            // 0..1 上升进度
+        int oy = (BUB_H - hh) - (int)(u * travel);            // 从底升到顶
+        float fade = 1.0f - u * 0.7f;                         // 越升越淡
+        draw_pixheart(g_bub, LCD_W, BUB_H, x0 + i * sp, oy, cs, fade);
     }
     blit_psram(g_bub, 0, BUB_Y0, LCD_W, BUB_H);
 }
 
-// 设置页：标题 + 亮度滑块 + 刷新按钮 + WiFi 信息（手搓，画进脸区域缓冲）
-// 控件局部坐标（与 main 的命中检测一致）：滑块 track x20..358 y64..78；按钮 x90..288 y96..134
+// 设置页：标题(含版本) + 亮度滑块 + 刷新吧唧/重启 两按钮 + WiFi 信息（手搓）
+// 控件局部坐标（与 display_settings_hit 一致）：滑块 y46..82；按钮 y90..126(刷新 x30..190 / 重启 x210..348)
+// btn_hot: 0 无 / 2 刷新高亮 / 3 重启高亮
 void display_settings(int bright, const char *ssid, const char *ip, int rssi, int btn_hot)
 {
     uint16_t *buf = g_face;
@@ -616,18 +630,18 @@ void display_settings(int bright, const char *ssid, const char *ip, int rssi, in
     const uint16_t W = 0xFFFF, C = sw16(0x07FF);
     char s[48];
 
-    draw_text(buf, RW, RH, (RW - text_width("设置")) / 2, 2, "设置", C);
+    snprintf(s, sizeof s, "设置  v%d", FW_VERSION);
+    draw_text(buf, RW, RH, (RW - text_width(s)) / 2, 2, s, C);
     snprintf(s, sizeof s, "亮度  %d%%", bright);
-    draw_text(buf, RW, RH, 20, 34, s, W);
+    draw_text(buf, RW, RH, 20, 30, s, W);
 
     // 滑块：底轨 + 填充 + 圆钮
-    const int tx0 = 20, tw = RW - 40, ty = 64, th = 14;
-    const uint16_t trackc = sw16(0x4208), fillc = sw16(0x07FF);
+    const int tx0 = 20, tw = RW - 40, ty = 56, th = 14;
     for (int y = ty; y < ty + th; y++)
-        for (int x = tx0; x < tx0 + tw; x++) buf[(size_t)y * RW + x] = trackc;
+        for (int x = tx0; x < tx0 + tw; x++) buf[(size_t)y * RW + x] = sw16(0x4208);
     int fw = tw * bright / 100;
     for (int y = ty; y < ty + th; y++)
-        for (int x = tx0; x < tx0 + fw; x++) buf[(size_t)y * RW + x] = fillc;
+        for (int x = tx0; x < tx0 + fw; x++) buf[(size_t)y * RW + x] = sw16(0x07FF);
     int kx = tx0 + fw, ky = ty + th / 2, kr = 11;
     for (int y = ky - kr; y <= ky + kr; y++)
         for (int x = kx - kr; x <= kx + kr; x++) {
@@ -635,17 +649,21 @@ void display_settings(int bright, const char *ssid, const char *ip, int rssi, in
             if (dx * dx + dy * dy <= kr * kr && x >= 0 && x < RW && y >= 0 && y < RH) buf[(size_t)y * RW + x] = W;
         }
 
-    // 按钮
-    const int bx = 90, by = 96, bw = RW - 180, bh = 38;
-    const uint16_t bc = btn_hot ? sw16(0x07E0) : sw16(0x39C7);
-    for (int y = by; y < by + bh; y++)
-        for (int x = bx; x < bx + bw; x++) buf[(size_t)y * RW + x] = bc;
-    draw_text(buf, RW, RH, bx + (bw - text_width("刷新吧唧")) / 2, by + (bh - FONT_H) / 2, "刷新吧唧", btn_hot ? sw16(0) : W);
+    // 两按钮
+    const int by = 90, bh = 36;
+    int b1x = 30, b1w = 160;     // 刷新吧唧
+    uint16_t b1c = (btn_hot == 2) ? sw16(0x07E0) : sw16(0x39C7);
+    for (int y = by; y < by + bh; y++) for (int x = b1x; x < b1x + b1w; x++) buf[(size_t)y * RW + x] = b1c;
+    draw_text(buf, RW, RH, b1x + (b1w - text_width("刷新吧唧")) / 2, by + (bh - FONT_H) / 2, "刷新吧唧", (btn_hot == 2) ? sw16(0) : W);
+    int b2x = 210, b2w = 138;    // 重启
+    uint16_t b2c = (btn_hot == 3) ? sw16(0xF800) : sw16(0x39C7);
+    for (int y = by; y < by + bh; y++) for (int x = b2x; x < b2x + b2w; x++) buf[(size_t)y * RW + x] = b2c;
+    draw_text(buf, RW, RH, b2x + (b2w - text_width("重启")) / 2, by + (bh - FONT_H) / 2, "重启", W);
 
     // WiFi 信息
-    snprintf(s, sizeof s, "WiFi %s", ssid[0] ? ssid : "-"); draw_text(buf, RW, RH, 20, 146, s, W);
-    snprintf(s, sizeof s, "IP   %s", ip[0] ? ip : "-");     draw_text(buf, RW, RH, 20, 172, s, W);
-    snprintf(s, sizeof s, "信号 %d dBm", rssi);             draw_text(buf, RW, RH, 20, 198, s, W);
+    snprintf(s, sizeof s, "WiFi %s", ssid[0] ? ssid : "-"); draw_text(buf, RW, RH, 20, 140, s, W);
+    snprintf(s, sizeof s, "IP   %s", ip[0] ? ip : "-");     draw_text(buf, RW, RH, 20, 166, s, W);
+    snprintf(s, sizeof s, "信号 %d dBm", rssi);             draw_text(buf, RW, RH, 20, 192, s, W);
 
     blit_psram(buf, RX0, RY0, RW, RH);
 }
@@ -666,16 +684,19 @@ void display_touchdot(int sx, int sy)
     blit_psram(buf, RX0, RY0, RW, RH);
 }
 
-// 设置页命中检测（屏幕坐标）：0=空白 1=滑块(*bright=该处亮度) 2=按钮
+// 设置页命中检测（屏幕坐标）：0=空白 1=滑块(*bright) 2=刷新吧唧 3=重启
 int display_settings_hit(int sx, int sy, int *bright)
 {
     int lx = sx - RX0, ly = sy - RY0;
-    if (ly >= 54 && ly <= 90 && lx >= 8 && lx <= 358) {
-        int b = (lx - 20) * 100 / 338; if (b < 0) b = 0; else if (b > 100) b = 100;
+    if (ly >= 46 && ly <= 82 && lx >= 8 && lx <= 358) {
+        int b = (lx - 20) * 100 / (RW - 40); if (b < 0) b = 0; else if (b > 100) b = 100;
         if (bright) *bright = b;
         return 1;
     }
-    if (lx >= 90 && lx <= 288 && ly >= 96 && ly <= 134) return 2;
+    if (ly >= 90 && ly <= 126) {
+        if (lx >= 30 && lx <= 190) return 2;
+        if (lx >= 210 && lx <= 348) return 3;
+    }
     return 0;
 }
 

@@ -9,7 +9,9 @@
 #include "freertos/task.h"
 #include "esp_random.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "nvs_flash.h"
+#include "nvs.h"
 #include "display.h"             // 显示层：display_init/face/bubble/battery/stats
 #include "i2c_bus.h"             // 共享 I2C 总线（电量 + 触摸）
 #include "power.h"               // AXP2101 电量（g_batt / g_charging / power_read）
@@ -28,6 +30,24 @@ static const char *TAG = "monita";
 #define BRIGHT_SLEEPY 28                              // sleepy 时再暗
 
 static inline float frand(void) { return (float)esp_random() / (float)UINT32_MAX; }
+
+// 设置持久化（NVS）：亮度等，重启不丢
+static int cfg_load_bright(void)
+{
+    nvs_handle_t h; int v = BRIGHT_NORMAL;
+    if (nvs_open("monita", NVS_READONLY, &h) == ESP_OK) {
+        int32_t x; if (nvs_get_i32(h, "bright", &x) == ESP_OK && x >= 5 && x <= 100) v = x;
+        nvs_close(h);
+    }
+    return v;
+}
+static void cfg_save_bright(int v)
+{
+    nvs_handle_t h;
+    if (nvs_open("monita", NVS_READWRITE, &h) == ESP_OK) {
+        nvs_set_i32(h, "bright", v); nvs_commit(h); nvs_close(h);
+    }
+}
 
 void app_main(void)
 {
@@ -69,14 +89,14 @@ void app_main(void)
     TickType_t media_t0 = 0;
     uint8_t *media = NULL; int media_w = 0, media_h = 0, media_nf = 0, media_fi = 0;  // 媒体页(.m8g)播放
     TickType_t media_next = 0;
-    int  user_bright = BRIGHT_NORMAL;          // 设置页亮度滑块控制的常态亮度
-    bool st_dirty = false, btn_hot = false;    // 设置页待重画 / 按钮高亮
+    int  user_bright = cfg_load_bright();      // 设置页亮度（NVS 持久化，重启不丢）
+    bool st_dirty = false; int btn_hot = 0;    // 设置页待重画 / 按钮高亮(2刷新/3重启)
     char st_ssid[40] = "", st_ip[20] = ""; int st_rssi = 0, st_tick = 0;
 
     // 省电：按需渲染（画面没真变化就不重画）+ 亮度
     const mood_t *last_m = NULL;
     int last_by = 0, last_gx = 0, last_ok = 0, last_sw = -2, last_tr = -2;
-    int cur_bright = BRIGHT_NORMAL;
+    int cur_bright = -1;                        // 强制首帧应用(可能是 NVS 载入的亮度)
 
     // 被摸态合成表情（∩ 弯眼 + 强腮红）
     static const mood_t PET_LO = {"pet", EYE_HAPPY, 46, 32, 26, 1.0f, false, false, true, false, false, "好舒服~"};
@@ -89,9 +109,11 @@ void app_main(void)
         if (tnow && (abs(g_tx - down_x) > 40 || abs(g_ty - down_y) > 40)) moved = true;
         if (!tnow && was_touch) {                          // 松手
             bool tap = !moved && (xTaskGetTickCount() - down_t) < pdMS_TO_TICKS(300);
-            if (page == 3) {                                // 设置页：命中按钮/空白处理
+            if (page == 3) {                                // 设置页：松手处理
+                cfg_save_bright(user_bright);               // 任何松手都存一下亮度(NVS)
                 int r = display_settings_hit(down_x, down_y, NULL);
                 if (r == 2) { if (media) { free(media); media = NULL; media_nf = 0; } st_dirty = true; }  // 刷新吧唧
+                else if (r == 3) { esp_restart(); }                                                       // 重启
                 else if (tap && r == 0) { page = 0; page_dirty = true; }                                  // 空白轻点回脸
             } else if (tap) {
                 page = (page + 1) % 4;                      // 脸→数值→吧唧→设置→脸
@@ -175,9 +197,9 @@ void app_main(void)
             if (tnow) {
                 int b, r = display_settings_hit(g_tx, g_ty, &b);
                 if (r == 1 && b != user_bright) { user_bright = b; display_brightness(b); st_dirty = true; }
-                bool hot = (r == 2);
+                int hot = (r == 2 || r == 3) ? r : 0;
                 if (hot != btn_hot) { btn_hot = hot; st_dirty = true; }
-            } else if (btn_hot) { btn_hot = false; st_dirty = true; }
+            } else if (btn_hot) { btn_hot = 0; st_dirty = true; }
             if ((st_tick++ % 40) == 0) {                 // 定期刷 WiFi 信息
                 char ns[40], nip[20]; int nr; net_info(ns, sizeof ns, nip, sizeof nip, &nr);
                 if (strcmp(ns, st_ssid) || strcmp(nip, st_ip) || nr != st_rssi) {
