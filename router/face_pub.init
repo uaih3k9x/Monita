@@ -1,0 +1,15 @@
+#!/bin/sh /etc/rc.common
+# 小圆脸数据发布器 procd 服务：开机自启、崩溃自重启。
+# 部署：放到 /etc/init.d/face_pub，chmod +x，`/etc/init.d/face_pub enable && /etc/init.d/face_pub start`
+START=99
+STOP=10
+USE_PROCD=1
+
+start_service() {
+	procd_open_instance
+	procd_set_param command /usr/bin/face_pub.sh
+	procd_set_param respawn 5 5 -1
+	procd_set_param stdout 0
+	procd_set_param stderr 0
+	procd_close_instance
+}

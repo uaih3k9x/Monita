@@ -1,0 +1,10 @@
+#!/bin/sh
+# WAN 切换时自动重启 OpenClash，让 clash 出口重绑到当前活动 WAN（蜂窝/有线通用）。
+# 背景：OpenClash 只在启动那刻绑定出口 WAN，切 WAN 后不会自己重绑 → clash 拨节点 "network unreachable"。
+# 部署：放到 /etc/hotplug.d/iface/99-openclash-rewan，chmod +x。
+[ "$ACTION" = "ifup" ] || [ "$ACTION" = "ifdown" ] || exit 0
+case "$INTERFACE" in wan|wan6|wwan|cpe|modem|cellular) ;; *) exit 0 ;; esac
+LOCK=/tmp/openclash_rewan.pending
+[ -f "$LOCK" ] && exit 0
+touch "$LOCK"
+( sleep 5; rm -f "$LOCK"; /etc/init.d/openclash enabled && /etc/init.d/openclash restart ) >/dev/null 2>&1 &
