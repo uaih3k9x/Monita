@@ -428,7 +428,7 @@ static void draw_stats_page(void)
     draw_text(buf, RW, RH, x, y, s, C); y += lh + 2;
     snprintf(s, sizeof s, "RSRP %d  SINR %d", g_stat.rsrp, g_stat.sinr);
     draw_text(buf, RW, RH, x, y, s, W); y += lh;
-    snprintf(s, sizeof s, "载波 %dCC  B%s", g_stat.band_count, g_stat.band[0] ? g_stat.band : "?");
+    snprintf(s, sizeof s, "载波 %dCC B%s  设备%d", g_stat.band_count, g_stat.band[0] ? g_stat.band : "?", g_stat.clients);
     draw_text(buf, RW, RH, x, y, s, W); y += lh;
     snprintf(s, sizeof s, "↓%ldk ↑%ldk", g_stat.dl / 1000, g_stat.ul / 1000);
     draw_text(buf, RW, RH, x, y, s, W); y += lh;

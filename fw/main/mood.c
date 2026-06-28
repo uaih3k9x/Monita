@@ -96,6 +96,12 @@ void mood_update(cJSON *j)
     strncpy(g_stat.mode, mode, sizeof g_stat.mode - 1); g_stat.mode[sizeof g_stat.mode - 1] = 0;
     strncpy(g_stat.band, band, sizeof g_stat.band - 1); g_stat.band[sizeof g_stat.band - 1] = 0;
 
+    // 设备列表：在线设备数 + 新上线主机名（路由器算好）
+    int clients = (int)jnum(j, "clients", 0);
+    cJSON *jnd = cJSON_GetObjectItem(j, "newdev");
+    const char *newdev = (jnd && cJSON_IsString(jnd)) ? jnd->valuestring : "";
+    g_stat.clients = clients;
+
     int target = map_mood(j);
 
     // E4 久闲→sleepy：信号好(grin/happy) + 吞吐持续很低 ~5min
@@ -115,11 +121,15 @@ void mood_update(cJSON *j)
     } else { cand = target; cand_cnt = 1; }
 
     // E2 事件检测（与上一拍比）→ 临时盖 surprised + 短气泡 4.5s
-    static int  prev_init = 0, prev_online = 1, prev_bandc = -1;
+    static int  prev_init = 0, prev_online = 1, prev_bandc = -1, prev_clients = -1;
     static char prev_mode[24] = "";
     if (prev_init) {
         int fired = 0;
-        if (online && !prev_online) {
+        if (prev_clients >= 0 && clients > prev_clients) {              // 新设备上线 → 是新朋友！
+            if (newdev[0] && newdev[0] != '*') snprintf(g_evt_bub, sizeof g_evt_bub, "新朋友 %s!", newdev);
+            else strcpy(g_evt_bub, "是新朋友！");
+            fired = 1;
+        } else if (online && !prev_online) {
             strcpy(g_evt_bub, "上线啦~"); fired = 1;
         } else if (bandc != prev_bandc && bandc > 0 && prev_bandc > 0) {
             snprintf(g_evt_bub, sizeof g_evt_bub, "载波%s%dCC",
@@ -135,7 +145,7 @@ void mood_update(cJSON *j)
             ESP_LOGI(TAG, "事件→%s", g_evt_bub);
         }
     }
-    prev_online = online; prev_bandc = bandc;
+    prev_online = online; prev_bandc = bandc; prev_clients = clients;
     strncpy(prev_mode, mode, sizeof prev_mode - 1);
     prev_mode[sizeof prev_mode - 1] = 0;
     prev_init = 1;

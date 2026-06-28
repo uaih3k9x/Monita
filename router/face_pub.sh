@@ -34,11 +34,24 @@ while true; do
   IP=$(printf '%s' "$J" | jsonfilter -e '@.result[0].status.V4.ipaddrs[0]' 2>/dev/null)
   ONLINE=0; [ -n "$IP" ] && [ -n "$MODE" ] && ONLINE=1
   ip -4 route show default 2>/dev/null | grep -q . && ONLINE=1   # 有线/蜂窝任一有默认路由即在线（不误报 WAN 掉了）
+
+  # 设备列表（DHCP 租约）：在线设备数 + 检测新上线主机名（供「是新朋友！」反应）
+  MACS=$(awk '{print $2}' /tmp/dhcp.leases 2>/dev/null | sort -u)
+  CLIENTS=$(printf '%s\n' "$MACS" | grep -c .); CLIENTS=${CLIENTS:-0}
+  NEWMAC=""
+  if [ -s /tmp/face_devs ]; then
+    for m in $MACS; do grep -qx "$m" /tmp/face_devs 2>/dev/null || { NEWMAC="$m"; break; }; done
+  fi
+  printf '%s\n' "$MACS" > /tmp/face_devs
+  NEWDEV=""
+  [ -n "$NEWMAC" ] && NEWDEV=$(awk -v m="$NEWMAC" 'tolower($2)==tolower(m){print $4; exit}' /tmp/dhcp.leases)
+  [ "$NEWDEV" = "*" ] && NEWDEV=""
+
   TS=$(date +%s)
 
-  printf '{"ts":%s,"online":%s,"mode":"%s","rsrp":%s,"rsrq":%s,"sinr":%s,"cqi":%s,"band_count":%s,"band":"%s","band1":"%s","temp":%s,"cpu":%s,"mem":%s,"dl_bps":%s,"ul_bps":%s,"isp":"%s","sim":"%s"}\n' \
+  printf '{"ts":%s,"online":%s,"mode":"%s","rsrp":%s,"rsrq":%s,"sinr":%s,"cqi":%s,"band_count":%s,"band":"%s","band1":"%s","temp":%s,"cpu":%s,"mem":%s,"dl_bps":%s,"ul_bps":%s,"isp":"%s","sim":"%s","clients":%s,"newdev":"%s"}\n' \
     "$TS" "$ONLINE" "$MODE" "$(num "$RSRP")" "$(num "$RSRQ")" "$(num "$SINR")" "$(num "$CQI")" \
     "$(num "$BC")" "$BAND" "$BAND1" "$(num "$TEMP")" "$(num "$CPU")" "$(num "$MEM")" \
-    "$DL" "$UL" "$ISP" "$SIM" > "$TMP" 2>/dev/null
+    "$DL" "$UL" "$ISP" "$SIM" "$CLIENTS" "$NEWDEV" > "$TMP" 2>/dev/null
   mv "$TMP" "$OUT" 2>/dev/null
 done

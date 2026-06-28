@@ -27,7 +27,7 @@ extern const mood_t MOODS[];
 
 // 最近一拍 face.json 的原始数值（数值页显示用）
 typedef struct {
-    int  online, rsrp, sinr, band_count, temp;
+    int  online, rsrp, sinr, band_count, temp, clients;
     long dl, ul;
     char mode[24];
     char band[12];
