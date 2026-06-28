@@ -67,7 +67,6 @@ void app_main(void)
     bool  page_dirty = false;
     bool  was_touch = false, moved = false;
     TickType_t down_t = 0; int down_x = 0, down_y = 0;
-    int   stats_tick = 0;
     TickType_t media_t0 = 0;
     uint8_t *media = NULL; int media_w = 0, media_h = 0, media_nf = 0, media_fi = 0;  // 媒体页(.m8g)播放
     TickType_t media_next = 0;
@@ -102,18 +101,18 @@ void app_main(void)
         if (pet < 0.0f) pet = 0.0f; else if (pet > 1.3f) pet = 1.3f;
         const bool petting = pet > 0.18f;
 
-        // ── 数值页：清气泡/电量，定期刷数值，跳过脸渲染 ──
+        // ── 仪表盘（LVGL）：RSRP/SINR 弧表 + 吞吐曲线 + 信息条 ──
         if (page == 1) {
             if (page_dirty) {
-                display_bubble("");                        // 清气泡带
-                display_battery(-1, false);                // 清电量
-                shown_bub[0] = 1; shown_bub[1] = 0;        // 回脸页时强制重画气泡
-                shown_bstate = -99;
-                stats_tick = 0; page_dirty = false;
+                page_dirty = false;
+                display_bubble(""); display_battery(-1, false);
+                shown_bub[0] = 1; shown_bub[1] = 0; shown_bstate = -99;
+                display_clear();
+                lvgl_show_dash();
             }
-            if ((stats_tick++ % 50) == 0) display_stats();
+            lvgl_tick();
             t++;
-            vTaskDelay(pdMS_TO_TICKS(10));
+            vTaskDelay(pdMS_TO_TICKS(15));
             continue;
         }
 
@@ -165,7 +164,7 @@ void app_main(void)
                 display_bubble(""); display_battery(-1, false);
                 shown_bub[0] = 1; shown_bub[1] = 0; shown_bstate = -99;
                 display_clear();
-                lvgl_enter();                              // 标脏全屏，强制重画
+                lvgl_show_settings();                       // 切到设置屏，标脏全屏
             }
             lvgl_tick();                                   // 驱动 LVGL 渲染 + 输入
             if (g_badge_refresh) { g_badge_refresh = false; if (media) { free(media); media = NULL; media_nf = 0; } }
